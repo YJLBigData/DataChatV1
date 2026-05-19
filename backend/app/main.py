@@ -54,6 +54,7 @@ from app.core.orchestrator import Pipeline, get_pipeline, to_sse_done, to_sse_er
 from app.core.folders import get_folders_store
 from app.core.permissions import get_permissions_store
 from app.core.query_log import get_query_log_store
+from app.core.troubleshoot import configure_troubleshoot_logging, snapshot_chat
 from app.core.report import generate_report
 from app.core.report_templates import get_report_template_store
 
@@ -267,6 +268,7 @@ def create_app() -> FastAPI:
     async def _lifespan(_app: FastAPI):
         # 取代已弃用的 @app.on_event("startup")
         try:
+            configure_troubleshoot_logging()
             get_pipe()
             get_auth_store()
             get_query_log_store()
@@ -1001,9 +1003,17 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
     import uuid as _uuid
     trace_id = _uuid.uuid4().hex
     try:
+        # 输入校验前置：在创建会话 / 跑 pipeline / 调 LLM 之前先挡掉非法请求，
+        # 避免空问题新增空会话、超长问题白跑一次 embedding/检索。
+        question = (req.question or "").strip()
+        if not question:
+            return friendly_error("INPUT_INVALID", trace_id=trace_id, extra="问题不能为空")
+        if len(question) > 8000:
+            return friendly_error("INPUT_INVALID", trace_id=trace_id, extra="问题过长（超过 8000 字符）")
+
         session_id = req.conversation_id
         if not session_id:
-            session = store.create_session(user.id, title=_short_title(req.question))
+            session = store.create_session(user.id, title=_short_title(question))
             session_id = session.id
         else:
             sess = store.get_session(session_id)
@@ -1012,13 +1022,6 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
                 return friendly_error("INPUT_INVALID", trace_id=trace_id, extra="会话不存在或无权访问")
         if on_event:
             on_event(_simple_event("session", "ok", {"conversation_id": session_id}))
-
-        # 校验输入
-        question = (req.question or "").strip()
-        if not question:
-            return friendly_error("INPUT_INVALID", trace_id=trace_id, extra="问题不能为空")
-        if len(question) > 8000:
-            return friendly_error("INPUT_INVALID", trace_id=trace_id, extra="问题过长（超过 8000 字符）")
 
         history = store.history_for_llm(session_id, limit=4)
         prev_plan: Optional[QueryPlan] = None
@@ -1055,6 +1058,11 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
                 )
             except Exception:
                 pass
+            snapshot_chat(
+                trace_id=trace_id, user_id=user.id, username=user.username,
+                conversation_id=session_id, question=question,
+                status="error", error=f"{type(exc).__name__}: {exc}",
+            )
             return friendly_error("CHAT_FAILED", trace_id=trace_id)
 
         # 审计 P1-4：pipeline 在 SQL 编译 / Guard / 权限 / 执行失败时 ok=False，
@@ -1075,6 +1083,16 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
                 )
             except Exception as exc:
                 logger.warning("query_log record failed: %s", exc)
+            snapshot_chat(
+                trace_id=result.trace_id, user_id=user.id, username=user.username,
+                conversation_id=session_id, question=question,
+                plan=result.plan if isinstance(result.plan, dict) else {},
+                sql=str(result.sql or ""), rows=0,
+                elapsed_ms=int(result.elapsed_ms or 0), cached=False,
+                needs_clarify=False, status="error",
+                error=f"{result.error_code}: {internal}",
+                events=getattr(result, "events", None),
+            )
             return friendly_error(result.error_code or "CHAT_FAILED", trace_id=result.trace_id)
 
         # 规范化所有可能被 LLM 弄飞的字段
@@ -1109,6 +1127,16 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
             )
         except Exception as exc:
             logger.warning("query_log record failed: %s", exc)
+        snapshot_chat(
+            trace_id=result.trace_id, user_id=user.id, username=user.username,
+            conversation_id=session_id, question=question,
+            plan=plan_dict, sql=sql_str,
+            rows=int(result.rows or 0), elapsed_ms=int(result.elapsed_ms or 0),
+            cached=bool(result.cached),
+            needs_clarify=bool(plan_dict.get("needs_clarify")),
+            status="clarify" if plan_dict.get("needs_clarify") else "ok",
+            error="", events=getattr(result, "events", None),
+        )
 
         return {
             "ok": True,

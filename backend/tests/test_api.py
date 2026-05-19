@@ -263,6 +263,29 @@ def test_chat_requires_auth(client):
     assert r.status_code == 401
 
 
+def test_chat_invalid_input_no_side_effects(client, auth_headers):
+    """问题4 回归：空 / 超长问题在建会话、跑 pipeline、调 LLM 之前就被拦截，
+    不新增空会话，统一返回 ok=false / INPUT_INVALID / trace_id。"""
+    before = client.get("/api/conversations", headers=auth_headers).json()["items"]
+
+    r_empty = client.post("/api/chat", headers=auth_headers, json={"question": "   "})
+    assert r_empty.status_code == 200
+    b1 = r_empty.json()
+    assert b1["ok"] is False
+    assert b1["error_code"] == "INPUT_INVALID"
+    assert b1["trace_id"]
+
+    r_long = client.post("/api/chat", headers=auth_headers, json={"question": "好" * 8001})
+    assert r_long.status_code == 200
+    b2 = r_long.json()
+    assert b2["ok"] is False
+    assert b2["error_code"] == "INPUT_INVALID"
+    assert b2["trace_id"]
+
+    after = client.get("/api/conversations", headers=auth_headers).json()["items"]
+    assert len(after) == len(before), "非法问数不得新增会话"
+
+
 def test_feishu_push_failure_returns_ok_false(client, auth_headers, monkeypatch):
     """P1-2：飞书推送失败时后端返回 HTTP 200 + ok:false + user_message，
     不回传底层异常文本（前端据此不得显示“已推送”）。"""

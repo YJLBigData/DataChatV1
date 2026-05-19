@@ -50,9 +50,17 @@ CALCULATION_KEYWORDS: dict[str, str] = {
     "走势": "trend",
     "差值": "delta",
     "差距": "delta",
+    "差异": "delta",
+    "差额": "delta",
+    "相差": "delta",
     "累计": "cumulative",
     "累积": "cumulative",
 }
+
+# 两指标差异关键词。命中即认定"差异类问题"（被减数−减数），
+# 该意图比"前N/排名"更具体：'差异最大的前10'本质是按差异排序取TopN，
+# 故 diff 关键词存在时强制 calculation=delta，rank_n 仍单独解析进 limit。
+DIFF_KEYWORDS: tuple[str, ...] = ("差异", "差值", "差距", "差额", "相差")
 
 PERIOD_KEYWORDS: dict[str, tuple[str, int]] = {
     "本月": ("this_month", 0),
@@ -411,7 +419,11 @@ class Planner:
             f"{followup_rule}"
             "口径要求：1) 仅当问句明确提到『销售额』且无上一轮可继承口径时，销售额才默认 "
             "terminal_sale_amount_total；2) 涉及'达成率/目标完成'必须用 target 表的指标；"
-            "3) 用户提到'同比/环比/占比/排名/趋势'必须填到 calculation 字段。"
+            "3) 用户提到'同比/环比/占比/排名/趋势'必须填到 calculation 字段；"
+            "4) 两个指标的『差异/差值/差距/差额』是受支持的计算：calculation 填 \"delta\"，"
+            "metric=被减数、extra_metrics=[减数]（两者必须同表），系统会自动算出差异列并按差异排序；"
+            "『差异最大的前N』把 N 填到 limit。此类问题信息完整时一律 needs_clarify=false，不要因"
+            "“无法按衍生指标排序”而澄清——系统已支持。"
         )
 
         user = (
@@ -460,6 +472,10 @@ class Planner:
                 cn_map = {"一":1,"二":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10}
                 seed["rank_n"] = cn_map.get(cn_rank.group(1), 10)
                 seed["calculation"] = seed["calculation"] or "rank"
+        # 两指标差异意图优先级高于 rank：'差异最大的前10' 本质是按差异排序取 TopN，
+        # 故强制 calculation=delta，rank_n 已单独解析进 limit，不丢失"前N"。
+        if any(k in q for k in DIFF_KEYWORDS):
+            seed["calculation"] = "delta"
         # period
         for k, (period, n) in PERIOD_KEYWORDS.items():
             if k in q or k in ql:
@@ -675,10 +691,45 @@ class Planner:
             if self.semantic.metric(m) and self.semantic.metric(m).table == plan.table  # type: ignore
         ]
 
+        # 5b. 两指标差异（delta）——把"差异类问题"做实，杜绝被迫澄清。
+        #     被减数=metric，减数=同表第二个指标（优先 extra_metrics，其次召回集）。
+        #     只要凑齐两个同表指标即可执行；'差异最大的前N'=按差异降序取 TopN。
+        diff_intent = (
+            plan.calculation == "delta"
+            or rule_seed.get("calculation") == "delta"
+            or any(k in question for k in DIFF_KEYWORDS)
+        )
+        if diff_intent:
+            second = next(
+                (m for m in plan.extra_metrics
+                 if m != plan.metric and self.semantic.metric(m)
+                 and self.semantic.metric(m).table == plan.table),  # type: ignore
+                "",
+            )
+            if not second:
+                for c in bundle.metrics:
+                    md = self.semantic.metric(c.name)
+                    if md and md.name != plan.metric and md.table == plan.table:
+                        second = md.name
+                        break
+            if second:
+                plan.calculation = "delta"
+                plan.extra_metrics = [second]
+                asc = any(t in question for t in ("最小", "最低", "升序", "从小到大", "由小到大"))
+                plan.order_by = [OrderBy(field="metric_diff", dir="asc" if asc else "desc")]
+                if not plan.limit and rule_seed.get("rank_n"):
+                    plan.limit = rule_seed["rank_n"]
+                # 差异已可执行 → 收回 LLM 误置的澄清，既不答错也不无谓澄清
+                plan.needs_clarify = False
+                plan.clarify_reason = ""
+                plan.clarify_options = []
+
         # 6. order by — for rank we always sort by the metric desc
         clean_orders: list[OrderBy] = []
         for o in plan.order_by:
-            if o.field == plan.metric or self.semantic.metric(o.field):
+            if o.field == "metric_diff" and plan.calculation == "delta":
+                clean_orders.append(OrderBy(field="metric_diff", dir=o.dir or "desc"))
+            elif o.field == plan.metric or self.semantic.metric(o.field):
                 clean_orders.append(OrderBy(field=o.field or plan.metric, dir=o.dir or "desc"))
             elif self._dim_valid(o.field, plan.table):
                 clean_orders.append(OrderBy(field=o.field, dir=o.dir or "asc"))
@@ -706,9 +757,11 @@ class Planner:
             previous_plan=previous_plan, followup=inherit,
         )
 
-        # 9. calc → rank infers limit
+        # 9. calc → rank infers limit；delta 仅当问句给了"前N"才限行，否则按默认上限
         if plan.calculation == "rank" and not plan.limit:
             plan.limit = rule_seed.get("rank_n") or 10
+        if plan.calculation == "delta" and not plan.limit and rule_seed.get("rank_n"):
+            plan.limit = rule_seed["rank_n"]
 
         # 10. low-confidence => clarify ONLY if metric is unambiguous-bad
         # (we are accuracy-first, but "宁可澄清也不能答错" → never clarify when metric+group_by+filter exist)

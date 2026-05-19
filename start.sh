@@ -238,11 +238,25 @@ fi
 
 # ───────────────────────── 5. Python venv & 依赖 ─────────────────────────
 cyan "[5/7] 准备 Python 环境…"
-if [ ! -d "$BACKEND/.venv" ]; then
-  gray "  创建 venv (python3.11)…"
-  python3.11 -m venv "$BACKEND/.venv"
-fi
 PYBIN="$BACKEND/.venv/bin/python"
+# 自愈：.venv 缺失或残缺（如只剩 include/、bin/python 不可执行）一律重建，
+# 避免后续 pip/uvicorn 引用不存在的解释器导致启动直接失败。
+if [ ! -x "$PYBIN" ]; then
+  if [ -e "$BACKEND/.venv" ]; then
+    gray "  检测到残缺 .venv，重建中…"
+    rm -rf "$BACKEND/.venv"
+  else
+    gray "  创建 venv…"
+  fi
+  VENV_PY="$(command -v python3.11 || command -v python3 || true)"
+  if [ -z "$VENV_PY" ]; then
+    red "  未找到 python3.11/python3，无法创建虚拟环境"; exit 4
+  fi
+  "$VENV_PY" -m venv "$BACKEND/.venv" || { red "  创建 venv 失败"; exit 4; }
+fi
+if [ ! -x "$PYBIN" ]; then
+  red "  .venv 重建后仍无 $PYBIN，请检查 Python 安装"; exit 4
+fi
 if ! "$PYBIN" -c "import fastapi, sqlglot, redis, bcrypt, jwt" >/dev/null 2>&1; then
   gray "  安装/更新 backend/requirements.txt …"
   "$PYBIN" -m pip install --upgrade pip >/dev/null
@@ -313,7 +327,11 @@ green "  API 文档:  http://127.0.0.1:$PORT/api/docs"
 green "  健康探活:  http://127.0.0.1:$PORT/api/health"
 echo ""
 gray "  默认管理员: admin"
-gray "  默认密码:   admin@2026   (建议立即修改: ./scripts/reset_admin.sh)"
+if [ -f "$BACKEND/logs/INITIAL_ADMIN_PASSWORD.txt" ]; then
+  gray "  初始口令:   见 backend/logs/INITIAL_ADMIN_PASSWORD.txt（一次性，首登后必须改）"
+else
+  gray "  管理员口令: 由 .env 的 DATACHAT_ADMIN_PASSWORD 决定（重置: ./scripts/reset_admin.sh）"
+fi
 gray "  停止服务:   ./stop.sh"
 gray "  实时日志:   tail -F logs/backend.log"
 cyan "──────────────────────────────────────────────"

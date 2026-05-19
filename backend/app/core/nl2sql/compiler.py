@@ -68,6 +68,8 @@ class PlanCompiler:
             return self._compile_mom(plan, metric_def, table_def)
         if plan.calculation == "ratio":
             return self._compile_ratio(plan, metric_def, table_def)
+        if plan.calculation == "delta":
+            return self._compile_delta(plan, metric_def, table_def)
         return self._compile_basic(plan, metric_def, table_def)
 
     # ------------------------------------------------------------- basic
@@ -130,6 +132,53 @@ class PlanCompiler:
         where = self._build_where(plan, table)
         order_clause = f"`{metric.name}` DESC"
         sql = self._assemble_sql(select_parts, table, where, group_cols, order_clause, plan.limit or self.default_limit)
+        return sql, meta
+
+    # ------------------------------------------------------ delta (two-metric difference)
+
+    def _compile_delta(self, plan: QueryPlan, metric: MetricDef, table: TableDef) -> tuple[str, dict[str, Any]]:
+        """两个指标的差异（被减数 metric − 减数 extra_metrics[0]），可按差异排序取 TopN。
+
+        找不到同表的第二个指标时退回 _compile_basic（绝不报错），由上层当普通
+        多指标表展示，避免"差异类问题"直接失败或被迫澄清。
+        """
+        second: MetricDef | None = None
+        for name in plan.extra_metrics:
+            ed = self.semantic.metric(name)
+            if ed and ed.table == table.name and ed.name != metric.name:
+                second = ed
+                break
+        if second is None:
+            return self._compile_basic(plan, metric, table)
+
+        select_parts: list[str] = []
+        meta: dict[str, Any] = {"columns": {}, "metric": metric.name, "table": table.full_name, "calculation": "delta"}
+        group_cols = self._group_columns(plan, table, meta, select_parts)
+
+        diff_col = "metric_diff"
+        select_parts.append(f"{metric.expression} AS `{metric.name}`")
+        select_parts.append(f"{second.expression} AS `{second.name}`")
+        select_parts.append(f"({metric.expression}) - ({second.expression}) AS `{diff_col}`")
+        for m in (metric, second):
+            meta["columns"][m.name] = {
+                "kind": "metric", "label": m.label, "unit": m.unit,
+                "format": m.display_format, "decimals": m.decimals,
+            }
+        meta["columns"][diff_col] = {
+            "kind": "metric",
+            "label": f"{metric.label}与{second.label}差异",
+            "unit": metric.unit,
+            "format": metric.display_format,
+            "decimals": metric.decimals,
+        }
+        meta["diff_metrics"] = [metric.name, second.name]
+
+        where = self._build_where(plan, table)
+        # "差异最大" → 默认按差异降序；用户显式要"最小/升序"时尊重 asc
+        direction = "ASC" if (plan.order_by and (plan.order_by[0].dir or "").lower() == "asc") else "DESC"
+        order_clause = f"`{diff_col}` {direction}"
+        limit = plan.limit or (self.default_limit if plan.group_by else 0)
+        sql = self._assemble_sql(select_parts, table, where, group_cols, order_clause, limit)
         return sql, meta
 
     # ----------------------------------------------------------- yoy_growth

@@ -18,7 +18,10 @@
 ## 默认账号
 
 - 用户名：`admin`
-- 密码：`admin@2026`（来自 `.env` 的 `DATACHAT_ADMIN_PASSWORD`）
+- 密码：源码不含任何默认口令。若未设置 `.env` 的 `DATACHAT_ADMIN_PASSWORD`，
+  首次启动会生成一次性强口令，写入 `backend/logs/INITIAL_ADMIN_PASSWORD.txt`
+  （已被 `.gitignore` 忽略）并打印到后端日志，首次登录后强制修改。
+  生产环境建议在服务器本地 `.env` 显式设置仅自己知道的强口令。
 
 ## 重置管理员密码
 
@@ -89,6 +92,10 @@ start.sh / stop.sh / scripts/reset_admin.sh
 ## 测试
 
 ```bash
+# 首次/或 .venv 残缺时，先初始化依赖（start.sh 也会自愈重建）：
+python3.11 -m venv backend/.venv
+backend/.venv/bin/python -m pip install -r backend/requirements.txt
+
 # 单元 + API（不需 LLM/DB）——当前 68 passed（数量以输出为准，请勿写死）
 backend/.venv/bin/python -m pytest backend/tests/ -m "not e2e" -v
 

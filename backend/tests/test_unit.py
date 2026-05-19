@@ -19,6 +19,7 @@ from app.core.guard import SQLGuard, GuardError  # noqa: E402
 from app.core.nl2sql.plan import OrderBy, PlanFilter, QueryPlan, TimeKind, TimeRange  # noqa: E402
 from app.core.nl2sql.compiler import PlanCompiler  # noqa: E402
 from app.core.nl2sql.planner import Planner  # noqa: E402
+from app.core.retrieval import RetrievalBundle, RetrievalCandidate  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -165,6 +166,57 @@ def test_compile_achievement_rate_uses_target_table(semantic: SemanticLayer):
     assert "LIMIT 3" in sql
 
 
+def test_compile_delta_two_metric_difference(semantic: SemanticLayer):
+    """问题1 回归：两指标差异 + 按差异排序取 TopN 必须真正编译出 diff 列。"""
+    pc = PlanCompiler(semantic, default_limit=100)
+    plan = QueryPlan(
+        metric="terminal_sale_amount_total",
+        extra_metrics=["reduction_gd_sale_amount_total"],
+        group_by=["region"],
+        calculation="delta",
+        order_by=[OrderBy(field="metric_diff", dir="desc")],
+        time_range=TimeRange(kind=TimeKind.ABSOLUTE, year="2025", months=["01"]),
+        limit=10,
+    )
+    sql, meta = pc.compile(plan)
+    assert "SUM(terminal_sale_amount)" in sql
+    assert "SUM(reduction_gd_sale_amount)" in sql
+    assert "AS `metric_diff`" in sql
+    assert "(SUM(terminal_sale_amount)) - (SUM(reduction_gd_sale_amount))" in sql
+    assert "ORDER BY `metric_diff` DESC" in sql
+    assert "LIMIT 10" in sql
+    assert meta["columns"]["metric_diff"]["kind"] == "metric"
+    assert "差异" in meta["columns"]["metric_diff"]["label"]
+
+
+def test_compile_delta_ascending_when_smallest(semantic: SemanticLayer):
+    pc = PlanCompiler(semantic, default_limit=100)
+    plan = QueryPlan(
+        metric="terminal_sale_amount_total",
+        extra_metrics=["reduction_gd_sale_amount_total"],
+        group_by=["region"],
+        calculation="delta",
+        order_by=[OrderBy(field="metric_diff", dir="asc")],
+        time_range=TimeRange(kind=TimeKind.RELATIVE, period="this_month"),
+    )
+    sql, _ = pc.compile(plan)
+    assert "ORDER BY `metric_diff` ASC" in sql
+
+
+def test_compile_delta_single_metric_falls_back(semantic: SemanticLayer):
+    """无第二个同表指标时退回基础查询，绝不报错。"""
+    pc = PlanCompiler(semantic, default_limit=100)
+    plan = QueryPlan(
+        metric="terminal_sale_amount_total",
+        group_by=["region"],
+        calculation="delta",
+        time_range=TimeRange(kind=TimeKind.RELATIVE, period="this_month"),
+    )
+    sql, meta = pc.compile(plan)
+    assert "metric_diff" not in sql
+    assert "SUM(terminal_sale_amount)" in sql
+
+
 # --------------------------------------------------------- guard
 
 def test_guard_allows_select(semantic: SemanticLayer):
@@ -255,6 +307,67 @@ def test_planner_extract_rule_seed_quarter(semantic: SemanticLayer):
     assert seed["absolute"]["months"] == ["01", "02", "03"]
 
 
+def test_planner_diff_intent_beats_rank(semantic: SemanticLayer):
+    """问题1 回归：'差异…最大的前10' 必须解析出 calculation=delta（差异优先于
+    rank），rank_n 仍解析进 limit，时间/维度不丢。"""
+    p = Planner(semantic, retriever=type("R", (), {"search": lambda self, q: None})(), llm=None)  # type: ignore
+    q = "2025年1月各大区终端销售金额和还原过单金额差异是多少？差异金额最大的前10个大区列出来。"
+    seed = p._extract_rule_seed(q)
+    assert seed["calculation"] == "delta"
+    assert seed["rank_n"] == 10
+    assert "region" in seed["group_by_hint"]
+    assert seed["absolute"] == {"year": "2025", "months": ["01"]}
+
+
+def test_planner_validate_repair_delta_clears_clarify(semantic: SemanticLayer):
+    """问题1 回归：即便 LLM 误判 needs_clarify=true / calculation=rank，
+    校验阶段也要凑齐两指标→delta，收回无谓澄清。"""
+    p = Planner(semantic, retriever=type("R", (), {"search": lambda self, q: None})(), llm=None)  # type: ignore
+    q = "2025年1月各大区终端销售金额和还原过单金额差异是多少？差异金额最大的前10个大区列出来。"
+    seed = p._extract_rule_seed(q)
+    plan = QueryPlan(
+        metric="terminal_sale_amount_total",
+        extra_metrics=["reduction_gd_sale_amount_total"],
+        group_by=["region"],
+        calculation="rank",
+        order_by=[OrderBy(field="terminal_sale_amount_total", dir="desc")],
+        limit=10,
+        needs_clarify=True,
+        clarify_reason="无法按两指标差值排序",
+        clarify_options=[{"label": "x", "key": "x", "hint": "", "type": ""}],
+        confidence=0.65,
+    )
+    bundle = RetrievalBundle(metrics=[], dimensions=[], tables=[], few_shots=[], elapsed_ms=0)
+    out = p._validate_and_repair(plan, bundle, seed, today=date(2026, 4, 1), question=q)
+    assert out.calculation == "delta"
+    assert out.needs_clarify is False
+    assert out.clarify_reason == ""
+    assert out.extra_metrics == ["reduction_gd_sale_amount_total"]
+    assert out.order_by and out.order_by[0].field == "metric_diff"
+    assert out.order_by[0].dir == "desc"
+    assert out.limit == 10
+    assert out.table == "ads_bi_month_shop_item_dan_summary_df"
+
+
+def test_planner_validate_repair_delta_recovers_second_metric_from_bundle(semantic: SemanticLayer):
+    """LLM 只给了一个指标，但召回集里有同表第二个指标时，仍要凑成 delta。"""
+    p = Planner(semantic, retriever=type("R", (), {"search": lambda self, q: None})(), llm=None)  # type: ignore
+    q = "各大区终端销售金额和还原过单金额相差多少"
+    seed = p._extract_rule_seed(q)
+    plan = QueryPlan(metric="terminal_sale_amount_total", group_by=["region"], confidence=0.6)
+    bundle = RetrievalBundle(
+        metrics=[RetrievalCandidate(
+            kind="metric", name="reduction_gd_sale_amount_total",
+            label="还原过单金额", score=0.9, text="还原过单金额", payload={},
+        )],
+        dimensions=[], tables=[], few_shots=[], elapsed_ms=0,
+    )
+    out = p._validate_and_repair(plan, bundle, seed, today=date(2026, 4, 1), question=q)
+    assert out.calculation == "delta"
+    assert out.extra_metrics == ["reduction_gd_sale_amount_total"]
+    assert out.needs_clarify is False
+
+
 # --------------------------------------------------------- plan signature
 
 def test_plan_clarify_options_normalized_no_str_get_crash():
@@ -288,8 +401,9 @@ def test_auth_create_authenticate_token_roundtrip(tmp_path, monkeypatch):
 
     admin = store.get_by_username("admin")
     assert admin is not None and admin.role == "admin"
-    # admin email default 必须自动填入
-    assert admin.email == "yangjinlong1@feihe.com"
+    # admin 默认邮箱必须是占位，不得是 Git 公开的真实个人邮箱
+    assert admin.email == auth_mod.DEFAULT_ADMIN_EMAIL
+    assert "feihe.com" not in admin.email and "yangjinlong" not in admin.email
 
     # 弱密码必须被拒
     with pytest.raises(auth_mod.AuthError):
@@ -320,6 +434,45 @@ def test_auth_create_authenticate_token_roundtrip(tmp_path, monkeypatch):
 
     store.delete_user("alice")
     assert store.get_by_username("alice") is None
+
+
+def test_auth_no_builtin_default_credentials():
+    """问题2 回归：源码中不得保留可直接登录的默认口令 / 真实个人邮箱。"""
+    from app.core import auth as auth_mod
+    assert auth_mod.DEFAULT_ADMIN_PASSWORD == ""
+    assert "feihe.com" not in auth_mod.DEFAULT_ADMIN_EMAIL
+    assert "yangjinlong" not in auth_mod.DEFAULT_ADMIN_EMAIL
+
+
+def test_auth_generates_onetime_password_when_no_env(tmp_path, monkeypatch):
+    """问题2 回归：未设 DATACHAT_ADMIN_PASSWORD 时，首次启动生成一次性强口令、
+    强制改密、落到未跟踪文件（600），且任何旧公开默认口令都登不进去。"""
+    from app.core import auth as auth_mod
+    monkeypatch.delenv("DATACHAT_ADMIN_PASSWORD", raising=False)
+    monkeypatch.setenv("APP_ENV", "local")
+
+    store = auth_mod.AuthStore(path=tmp_path / "auth.db", secret="unit-test-secret")
+    admin = store.get_by_username("admin")
+    assert admin is not None and admin.role == "admin"
+    assert admin.must_change_password is True
+
+    pwd_file = tmp_path / "INITIAL_ADMIN_PASSWORD.txt"
+    assert pwd_file.exists()
+    assert (pwd_file.stat().st_mode & 0o777) == 0o600
+    content = pwd_file.read_text(encoding="utf-8")
+    gen_pwd = ""
+    for line in content.splitlines():
+        if line.startswith("password:"):
+            gen_pwd = line.split(":", 1)[1].strip()
+    assert gen_pwd
+    ok, _ = auth_mod.is_password_strong(gen_pwd)
+    assert ok
+    # 生成的口令能登录
+    assert store.authenticate("admin", gen_pwd).username == "admin"
+    # 历史上 Git 里公开过的默认口令一律登不进去
+    for old in ("Admin@feihe2026", "admin@2026", "admin", "password"):
+        with pytest.raises(auth_mod.AuthError):
+            store.authenticate("admin", old)
 
 
 def test_company_auth_store_email_roundtrip(tmp_path):

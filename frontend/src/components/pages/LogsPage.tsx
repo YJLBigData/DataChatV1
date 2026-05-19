@@ -144,8 +144,11 @@ export function LogsPage() {
                 <pre className="mt-1 max-h-[200px] overflow-auto rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-700">{active.sql}</pre>
               </details>
             )}
-            <details className="mt-2">
-              <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-700">QueryPlan</summary>
+            <details className="mt-2" open>
+              <summary className="flex cursor-pointer items-center gap-2 text-xs text-slate-500 hover:text-slate-700">
+                <span className="flex-1">QueryPlan</span>
+                <CopyButton label="复制日志" text={buildLogText(active)} />
+              </summary>
               <pre className="mt-1 max-h-[200px] overflow-auto rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-700">{JSON.stringify(active.plan, null, 2)}</pre>
             </details>
           </div>
@@ -161,6 +164,69 @@ function StatCard({ label, value, color = "text-slate-800" }: { label: string; v
       <div className="text-xs text-slate-500">{label}</div>
       <div className={`mt-1 text-2xl font-semibold tabular-nums ${color}`}>{value}</div>
     </div>
+  );
+}
+
+/** 把一条日志整理成可粘贴的排查文本（问句 + 计划 + SQL + 错误 + 元信息）。 */
+function buildLogText(it: QueryLogEntry): string {
+  return JSON.stringify(
+    {
+      trace_id: it.trace_id,
+      created_at: new Date(it.created_at * 1000).toLocaleString(),
+      username: it.username,
+      question: it.question,
+      status: it.status,
+      metric: it.metric,
+      table: it.table,
+      rows: it.rows,
+      elapsed_ms: it.elapsed_ms,
+      cached: it.cached,
+      needs_clarify: it.needs_clarify,
+      error: it.error,
+      sql: it.sql,
+      plan: it.plan,
+    },
+    null,
+    2,
+  );
+}
+
+function CopyButton({ text, label = "复制" }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  async function doCopy() {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void doCopy();
+      }}
+      className="rounded border px-2 py-0.5 text-[11px] text-slate-500 hover:bg-slate-50"
+      style={{ borderColor: "#e6ecf6" }}
+      title="复制本条日志（含问句/QueryPlan/SQL/错误），可直接粘贴给开发排查"
+    >
+      {copied ? "已复制" : label}
+    </button>
   );
 }
 

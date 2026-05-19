@@ -1,8 +1,10 @@
 """Minimal admin/user auth — bcrypt + JWT, SQLite-backed.
 
-Single admin account is auto-created on first start (with password from env
-DATACHAT_ADMIN_PASSWORD or fallback `admin@2026`). Additional users can be
-added via `/api/admin/users`.
+Single admin account is auto-created on first start. The password comes from
+env DATACHAT_ADMIN_PASSWORD; if unset, a one-time strong password is generated,
+written to `<auth-db-dir>/INITIAL_ADMIN_PASSWORD.txt` (chmod 600, git-ignored)
+and logged once — the admin is forced to change it on first login. There is no
+built-in/default password in source. Additional users via `/api/admin/users`.
 
 Token flow:
   POST /api/login {username, password}
@@ -31,9 +33,10 @@ import jwt
 JWT_ALG = "HS256"
 JWT_TTL_HOURS = 24 * 7
 DEFAULT_ADMIN_USERNAME = "admin"
-# admin 默认强密码（生产首次启动后必须改）；env 优先
-DEFAULT_ADMIN_PASSWORD = "Admin@feihe2026"
-DEFAULT_ADMIN_EMAIL = "yangjinlong1@feihe.com"
+# 源码中不再保留任何可直接登录的默认口令/真实邮箱（安全：Git 公开信息）。
+# 口令优先取 env DATACHAT_ADMIN_PASSWORD，缺省则首次启动随机生成一次性强口令。
+DEFAULT_ADMIN_PASSWORD = ""
+DEFAULT_ADMIN_EMAIL = "admin@example.com"
 
 
 def generate_initial_password() -> str:
@@ -182,13 +185,51 @@ class AuthStore:
             return
         if env not in _LOCAL_ENVS and (os.environ.get("DATACHAT_BOOTSTRAP_DEFAULT_ADMIN") or "").strip() not in ("1", "true", "True"):
             return
-        pwd = os.environ.get("DATACHAT_ADMIN_PASSWORD") or DEFAULT_ADMIN_PASSWORD
+        pwd = (os.environ.get("DATACHAT_ADMIN_PASSWORD") or "").strip()
+        generated = False
+        if not pwd:
+            # 无任何内置默认口令：随机生成一次性强口令，强制首登改密。
+            pwd = generate_initial_password()
+            generated = True
         if env not in _LOCAL_ENVS:
             ok, msg = is_password_strong(pwd)
             if not ok:
-                raise RuntimeError(f"生产环境默认管理员密码不符合强度要求：{msg}")
+                raise RuntimeError(f"生产环境管理员密码不符合强度要求：{msg}")
         admin_email = os.environ.get("DATACHAT_ADMIN_EMAIL") or DEFAULT_ADMIN_EMAIL
-        self.create_user(DEFAULT_ADMIN_USERNAME, pwd, role="admin", email=admin_email, enforce_strength=False)
+        self.create_user(
+            DEFAULT_ADMIN_USERNAME, pwd, role="admin", email=admin_email,
+            enforce_strength=False, must_change_password=generated,
+        )
+        if generated:
+            self._persist_initial_password(pwd)
+
+    def _persist_initial_password(self, pwd: str) -> None:
+        """把一次性初始口令写到 auth 库同级的未跟踪文件并打印一次，便于运维取用。
+
+        logs/ 已在 .gitignore，绝不会进 Git；权限 600，仅本机可读。
+        """
+        import logging
+
+        log = logging.getLogger("datachat.auth")
+        try:
+            target = Path(self.path).parent / "INITIAL_ADMIN_PASSWORD.txt"
+            target.write_text(
+                f"username: {DEFAULT_ADMIN_USERNAME}\npassword: {pwd}\n"
+                f"note: 首次登录后必须立即修改；此文件可删除。\n",
+                encoding="utf-8",
+            )
+            try:
+                os.chmod(target, 0o600)
+            except OSError:
+                pass
+            location = str(target)
+        except Exception as exc:  # 落盘失败不致命，至少日志里有
+            location = f"(写入失败: {exc})"
+        log.warning(
+            "首次启动已生成一次性管理员口令（username=%s）。请从 %s 获取并在首登后立即修改。"
+            "未配置 DATACHAT_ADMIN_PASSWORD 时不存在任何可预测的默认口令。",
+            DEFAULT_ADMIN_USERNAME, location,
+        )
 
     # ------------------------------------------------------------- users
 
@@ -204,7 +245,7 @@ class AuthStore:
         username = username.strip().lower()
         if self.get_by_username(username):
             raise AuthError(f"用户已存在: {username}")
-        # 邮箱校验（用户级邮箱即飞书账号；admin 默认 yangjinlong1@feihe.com）
+        # 邮箱校验（用户级邮箱即飞书账号；admin 默认邮箱为占位，按需在后台改）
         if email and not re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$", email):
             raise AuthError("邮箱格式不合法")
         uid = uuid.uuid4().hex

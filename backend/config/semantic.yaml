@@ -575,8 +575,9 @@ calculations:
     label: 趋势
     aliases: [趋势, 走势, 变化]
   delta:
-    label: 差值
-    aliases: [差值, 差距, 差额]
+    label: 差异
+    aliases: [差值, 差距, 差额, 差异, 相差, 差异金额]
+    formula: "指标A - 指标B（被减数 metric − 减数 extra_metrics[0]，同表）"
   cumulative:
     label: 累计
     aliases: [累计, 累积, 累计至今]
@@ -731,6 +732,28 @@ few_shots:
       group_by: [city]
       order_by: [{field: terminal_sale_amount_total, dir: desc}]
       limit: 5
+
+  - question: 2025年1月各大区终端销售金额和还原过单金额差异最大的前10个大区
+    intent:
+      metric: terminal_sale_amount_total
+      extra_metrics: [reduction_gd_sale_amount_total]
+      calculation: delta
+      time_range:
+        kind: absolute
+        year: '2025'
+        months: ['01']
+      group_by: [region]
+      limit: 10
+    sql_hint: |
+      SELECT lev2_name AS region,
+             SUM(terminal_sale_amount) AS terminal_sale_amount_total,
+             SUM(reduction_gd_sale_amount) AS reduction_gd_sale_amount_total,
+             (SUM(terminal_sale_amount)) - (SUM(reduction_gd_sale_amount)) AS metric_diff
+      FROM ads_bi_month_shop_item_dan_summary_df
+      WHERE year='2025' AND month='01'
+      GROUP BY lev2_name
+      ORDER BY metric_diff DESC
+      LIMIT 10
 
 # ----------------------------------------------------------------
 # 同义词字典（用户口语 → 标准术语）
