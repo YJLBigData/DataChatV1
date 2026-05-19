@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "datachatv2",
+      "runtimeExecutable": "/Users/yangjinlong/app/PythonProject/DataChatV1/.claude/worktrees/dazzling-hodgkin-624f61/backend/.venv/bin/uvicorn",
+      "runtimeArgs": ["app.v2_main:app", "--host", "127.0.0.1", "--port", "8001", "--app-dir", "/Users/yangjinlong/app/PythonProject/DataChatV1/.claude/worktrees/dazzling-hodgkin-624f61/backend"],
+      "port": 8001
+    }
+  ]
+}

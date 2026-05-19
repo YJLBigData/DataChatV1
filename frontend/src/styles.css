@@ -1,0 +1,128 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body {
+    margin: 0;
+    background: #f5f7fc;
+    color: #1f2937;
+    font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  * { box-sizing: border-box; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(120, 137, 175, 0.35); }
+  ::-webkit-scrollbar-track { background: transparent; }
+}
+
+@layer components {
+  .qq-card {
+    @apply rounded-2xl border bg-white;
+    border-color: #eef1f8;
+    box-shadow: 0 4px 18px rgba(83, 108, 156, 0.06);
+  }
+  .qq-soft {
+    @apply rounded-2xl;
+    background: #f7f9fd;
+  }
+  .qq-chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border bg-white px-3 py-1.5 text-xs text-slate-600 transition;
+    border-color: #e6ecf6;
+  }
+  .qq-chip:hover {
+    @apply text-blue-600;
+    border-color: #bdd2ff;
+    background: #f4f7ff;
+  }
+  .qq-pill {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px];
+  }
+  .qq-pill-blue { @apply qq-pill text-blue-600; background: #ecf3ff; }
+  .qq-pill-grey { @apply qq-pill text-slate-500; background: #eef0f5; }
+  .qq-pill-green { @apply qq-pill text-emerald-600; background: #e9f8ee; }
+  .qq-pill-amber { @apply qq-pill text-amber-700; background: #fff4e0; }
+  .qq-pill-red   { @apply qq-pill text-rose-600;  background: #fde6ea; }
+
+  .qq-btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-xl border px-3.5 py-1.5 text-sm font-medium transition;
+    border-color: #e1e6f0;
+    background: white;
+    color: #475068;
+  }
+  .qq-btn:hover { color: #2563eb; border-color: #bdd2ff; background: #f4f7ff; }
+  .qq-btn-primary {
+    @apply qq-btn;
+    color: white !important;
+    background: linear-gradient(135deg, #5a7dff 0%, #4763e7 100%) !important;
+    border-color: transparent !important;
+    box-shadow: 0 6px 18px rgba(71, 99, 231, 0.3);
+  }
+  .qq-btn-primary:hover { filter: brightness(1.05); }
+  .qq-btn-ghost {
+    @apply qq-btn;
+    border-color: transparent !important;
+    background: transparent !important;
+  }
+
+  .qq-bubble-user {
+    @apply max-w-[78%] rounded-3xl px-4 py-2.5 text-sm leading-7 text-white;
+    background: linear-gradient(135deg, #6f8dff 0%, #4763e7 100%);
+    box-shadow: 0 6px 18px rgba(71, 99, 231, 0.18);
+  }
+  .qq-stage-pill {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] text-slate-500;
+    border-color: #eef1f8;
+    background: white;
+  }
+  .qq-stage-active { color: #4763e7; border-color: #bdd2ff; background: #f4f7ff; }
+  .qq-stage-done { color: #10b981; border-color: #c7eed7; background: #f1faf4; }
+  .qq-stage-error { color: #ef4444; border-color: #f7c8c8; background: #fef3f3; }
+
+  .qq-table {
+    @apply w-full text-sm;
+  }
+  .qq-table th {
+    @apply sticky top-0 border-b bg-[#f8faff] px-3 py-2 font-medium text-slate-500;
+    border-color: #eef1f8;
+    text-align: left;  /* 维度/时间默认左对齐；metric 列由 markup 加 text-right 覆盖 */
+  }
+  .qq-table th.text-right { text-align: right; }
+  .qq-table td {
+    @apply border-b px-3 py-2 text-slate-700;
+    border-color: #f1f3f9;
+  }
+  .qq-table tr:hover td { background: #fafbff; }
+
+  .qq-link {
+    @apply text-blue-600 underline decoration-dotted underline-offset-4;
+  }
+
+  .qq-dot {
+    @apply inline-block h-1.5 w-1.5 rounded-full;
+  }
+
+  /* avatar wave */
+  .qq-avatar {
+    width: 56px; height: 56px;
+    border-radius: 18px;
+    background: linear-gradient(135deg, #6f8dff 0%, #4763e7 100%);
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-weight: 700; font-size: 22px;
+    box-shadow: 0 8px 24px rgba(71, 99, 231, 0.25);
+  }
+
+  /* loading dots */
+  .qq-loading-dot {
+    @apply inline-block h-1.5 w-1.5 rounded-full bg-blue-500;
+    animation: qqdot 1.2s infinite ease-in-out;
+  }
+  .qq-loading-dot:nth-child(2) { animation-delay: 0.2s; }
+  .qq-loading-dot:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes qqdot {
+    0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+    40% { transform: scale(1); opacity: 1; }
+  }
+}

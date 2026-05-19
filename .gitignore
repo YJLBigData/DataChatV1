@@ -1,0 +1,82 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+*_rsa
+*_ed25519
+
+.env
+*.env
+.env.*
+!.env.example
+!backend/.env.example
+config/runtime.local.env
+backend/config/runtime.local.env
+
+# 服务器部署脚本允许写真实 DB/AES/JWT 密钥，只保留在本地/服务器，不入库
+deploy/deploy_datachatv1.sh
+start_server.sh
+
+# safe_push 本地私有敏感词 denylist（项目专属真实密码/主机/账号，绝不入库）
+scripts/.secret_denylist
+
+.venv/
+**/.venv/
+backend/.venv
+venv/
+env/
+node_modules/
+frontend/node_modules/
+
+# 环境专属默认配置（无任何密钥，必须入库）——放在 env/ 规则之后才能生效
+!backend/config/env/
+!backend/config/env/*.env
+
+# 运行态 / 工具目录（绝不入库）
+.pids/
+**/.pids/
+*.pid
+.mysql/
+.claude/
+**/.claude/worktrees/
+backend/.pids/
+
+logs/
+backend/logs/
+traces/
+backend/traces/
+traces_v1/
+backend/traces_v1/
+reports/generated/
+backend/reports/generated/
+backend/reports/v1/generated/
+dist/
+build/
+# backend/web/ 预构建前端【需入库】：服务器(CentOS7) 跑不了新版 Node 构建 Vite，
+# 走 git 部署时必须带上构建产物，故不再忽略 backend/web/。
+frontend/dist/
+trace/
+
+*.db
+*.sqlite
+*.sqlite3
+auth.db
+datachat.db
+datachat_auth.db
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage/
+htmlcov/
+
+# Claude worktrees (运行态，勿入库)
+.claude/worktrees/
