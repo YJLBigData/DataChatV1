@@ -443,6 +443,69 @@ def test_company_user_directory(tmp_path, monkeypatch):
     assert store.authenticate("u@feihe.com", "Newp@ss2026").username == "u@feihe.com"
 
 
+# ============================================================ planner 抗"LLM 过度澄清"
+def test_planner_overrides_llm_clarify_when_structurally_sufficient(planner, semantic):
+    """同一道'差异/比较类'问题，百炼 LLM 不会 needs_clarify，飞鹤 kaier_znws 会。
+    planner 在 metric + (group_by|filter|calculation) 任一信号充分 + confidence ≥ 0.3 时，
+    必须信结构、忽略 LLM 的 needs_clarify，让 compiler/answerer 兜底处理衍生表达式。
+    """
+    # 模拟飞鹤 LLM 给出的"结构完整但又自我澄清"的 plan
+    llm_plan = QueryPlan(
+        metric="terminal_sale_amount_total",
+        extra_metrics=["reduction_gd_sale_amount_total"],
+        table=SUMMARY,
+        group_by=["region"],
+        time_range=TimeRange(kind=TimeKind.ABSOLUTE, year="2025", months=["01"]),
+        calculation="rank",
+        order_by=[OrderBy(field="terminal_sale_amount_total", dir="desc")],
+        limit=10,
+        confidence=0.6,
+        needs_clarify=True,
+        clarify_reason="系统无法在查询层按两个指标的差值排序",
+        clarify_options=[],
+    )
+    bundle = RetrievalBundle(metrics=[], dimensions=[], tables=[], few_shots=[], elapsed_ms=0)
+    out = planner._validate_and_repair(
+        llm_plan, bundle, rule_seed={}, today=date(2026, 4, 1),
+        previous_plan=None, followup=False, question="2025年1月各大区终端销售金额和还原过单金额差异是多少？差异最大的前10个大区列出来。",
+    )
+    assert out.needs_clarify is False, f"结构充分时应被强制执行: {out.clarify_reason!r}"
+    assert out.clarify_reason == ""
+    assert out.clarify_options == []
+    # 结构关键字段必须保留，等下游 compiler 把两个指标都 SELECT 出来
+    assert out.metric == "terminal_sale_amount_total"
+    assert "reduction_gd_sale_amount_total" in out.extra_metrics
+    assert "region" in out.group_by
+    assert out.calculation == "rank"
+
+    # compiler 实际产出的 SQL 必须同时包含两个指标列，answerer 才有数据兜底算差异
+    sql, _ = PlanCompiler(semantic, default_limit=500).compile(out)
+    assert "terminal_sale_amount" in sql
+    assert "reduction_gd_sale_amount" in sql
+    assert "lev2_name" in sql  # region → lev2_name
+    assert "'2025'" in sql and "'01'" in sql
+
+
+def test_planner_keeps_clarify_when_structurally_insufficient(planner, semantic):
+    """信号不足时仍然必须澄清——不能把一切 LLM 澄清都覆盖。"""
+    weak_plan = QueryPlan(
+        metric="",                # 没识别出指标
+        table="",
+        group_by=[],
+        filters=[],
+        calculation="",
+        confidence=0.2,           # 低置信
+        needs_clarify=True,
+        clarify_reason="无法确定要查询的业务指标，请补充关键词",
+    )
+    bundle = RetrievalBundle(metrics=[], dimensions=[], tables=[], few_shots=[], elapsed_ms=0)
+    out = planner._validate_and_repair(
+        weak_plan, bundle, rule_seed={}, today=date(2026, 4, 1),
+        previous_plan=None, followup=False, question="看一下情况",
+    )
+    assert out.needs_clarify is True
+
+
 # ============================================================ 飞鹤网关签名（确定性）
 def test_feihe_gateway_sign_deterministic():
     from app.core.llm.feihe_gateway import build_sign, FeiheGatewayError

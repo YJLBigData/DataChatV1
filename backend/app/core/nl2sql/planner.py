@@ -713,12 +713,28 @@ class Planner:
         # 10. low-confidence => clarify ONLY if metric is unambiguous-bad
         # (we are accuracy-first, but "宁可澄清也不能答错" → never clarify when metric+group_by+filter exist)
         has_signal = bool(plan.filters) or bool(plan.group_by) or bool(plan.calculation)
+        plan_actionable = bool(plan.metric) and has_signal
         if plan.confidence and plan.confidence < 0.3 and not has_signal:
             plan.needs_clarify = True
             if not plan.clarify_reason:
                 plan.clarify_reason = "问题信息较少，请确认想看的维度（如大区/产品系列/段位）"
             if not plan.clarify_options:
                 plan.clarify_options = self._build_clarify_options_from_bundle(bundle)
+        elif plan.needs_clarify and plan_actionable:
+            # 结构充分时 LLM 仍说要澄清 → 信结构，强制执行
+            # 触发场景：不同 LLM (百炼/飞鹤 kaier_znws/...) 对衍生表达式（diff/ratio/绝对值）
+            # 排序的容忍度不同——飞鹤侧会主动 needs_clarify=true，百炼侧不会。compiler 已经会把
+            # extra_metrics 一并 SELECT 出来，answerer 在 narrative 阶段可以兜底计算差值/比率，
+            # 因此结构上 metric + (filters|group_by|calculation) 已足够，不应再回弹给用户。
+            logger.info(
+                "plan.override_llm_clarify metric=%s table=%s group_by=%s extra=%s "
+                "calc=%s conf=%s reason=%r",
+                plan.metric, plan.table, plan.group_by, plan.extra_metrics,
+                plan.calculation, plan.confidence, plan.clarify_reason,
+            )
+            plan.needs_clarify = False
+            plan.clarify_reason = ""
+            plan.clarify_options = []
         else:
             plan.needs_clarify = bool(plan.needs_clarify)
 
