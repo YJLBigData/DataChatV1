@@ -5,12 +5,16 @@ Designed to be small, deterministic, and reload-safe.
 """
 from __future__ import annotations
 
+import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger("datachat.semantic")
 
 
 @dataclass
@@ -195,11 +199,24 @@ class SemanticLayer:
 
     def _load_tables(self, raw: dict[str, Any]) -> None:
         self.tables.clear()
+        # 业务库名以环境变量为准（线上 .env: MYSQL_DATABASE=hs_poc；本地 dev: chatbi）。
+        # semantic.yaml 里写死 schema 不可避免会和服务器实际 DB 名不一致——必须 env 优先，
+        # 否则 compiler 会输出 `FROM chatbi.xxx` 跑到错误的库里去。
+        db_override = (
+            os.environ.get("DATACHAT_BUSINESS_DB")
+            or os.environ.get("MYSQL_DATABASE")
+            or os.environ.get("DB_NAME")
+            or ""
+        ).strip()
+        if db_override:
+            logger.info("semantic.schema_override -> %s (from env)", db_override)
         for name, body in raw.items():
+            yaml_schema = str(body.get("schema") or "")
+            schema = db_override or yaml_schema
             self.tables[name] = TableDef(
                 name=name,
                 label=str(body.get("label") or name),
-                schema=str(body.get("schema") or ""),
+                schema=schema,
                 grain=str(body.get("grain") or ""),
                 description=str(body.get("description") or "").strip(),
                 time_field=body.get("time_field"),

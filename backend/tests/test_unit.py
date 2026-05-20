@@ -41,6 +41,38 @@ def test_semantic_layer_loads_metrics_and_dims(semantic: SemanticLayer):
     assert len(semantic.calculations) >= 7
 
 
+def test_semantic_schema_overrides_from_env(cfg, monkeypatch):
+    """生产服务器业务库名 (MYSQL_DATABASE / DB_NAME) 必须覆盖 semantic.yaml 里的本地默认值 chatbi，
+    否则 compiler 会输出 `FROM chatbi.xxx` 跑到不存在的库——这是上线必踩坑。"""
+    # 1) env 设置后，所有表的 schema 都换成 env 值
+    monkeypatch.setenv("MYSQL_DATABASE", "hs_poc")
+    sl = SemanticLayer(cfg.app.semantic_path)
+    assert sl.tables, "semantic 至少要加载到一张表"
+    for t in sl.tables.values():
+        assert t.schema == "hs_poc", f"{t.name}.schema 未被 env 覆盖: {t.schema!r}"
+        assert t.full_name.startswith("hs_poc.")
+    # compiler 实际产出的 SQL 必须含 hs_poc.，不能含 chatbi.
+    plan = QueryPlan(
+        metric="terminal_sale_amount_total",
+        table="ads_bi_month_shop_item_dan_summary_df",
+        group_by=["region"],
+        time_range=TimeRange(kind=TimeKind.ABSOLUTE, year="2025", months=["01"]),
+        calculation="rank",
+        order_by=[OrderBy(field="terminal_sale_amount_total", dir="desc")],
+        limit=10,
+    )
+    sql, _ = PlanCompiler(sl, default_limit=500).compile(plan)
+    assert "hs_poc" in sql and "chatbi" not in sql, f"SQL 仍含 chatbi: {sql}"
+
+    # 2) env 缺失则回退 yaml（本地 dev 默认 chatbi）
+    monkeypatch.delenv("MYSQL_DATABASE", raising=False)
+    monkeypatch.delenv("DB_NAME", raising=False)
+    monkeypatch.delenv("DATACHAT_BUSINESS_DB", raising=False)
+    sl2 = SemanticLayer(cfg.app.semantic_path)
+    for t in sl2.tables.values():
+        assert t.schema == "chatbi"
+
+
 def test_metric_alias_resolves(semantic: SemanticLayer):
     assert semantic.find_metric_by_alias("终端销售额").name == "terminal_sale_amount_total"
     assert semantic.find_metric_by_alias("销售额").name == "terminal_sale_amount_total"
