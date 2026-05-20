@@ -776,11 +776,17 @@ def create_app() -> FastAPI:
         trace_id = _uuid.uuid4().hex
         # 安全（P1）：禁止请求体指定任意 webhook/url（SSRF / 内网探测）。
         # 推送目标只允许：服务端配置的 webhook，或按"用户邮箱→open_id"个人推送。
-        # 普通用户只能推给自己；管理员可指定他人邮箱。
-        if user.role == "admin" and req.user_email:
-            target_email = req.user_email
+        #
+        # 收件人解析规则：
+        #   · 管理员：必须显式传 user_email（admin@feihe.com 这种系统账号在飞书查不到
+        #     open_id，绝不应该 fallback 到 user.email 去试，会必失败）；
+        #     若没传，target_email=None → 落到 env 里 FEISHU_WEBHOOK 兜底（管理群）。
+        #   · 普通用户：用自己绑定的飞书邮箱 user.email。请求体里 user_email 一概忽略，
+        #     防止越权推给别人。
+        if user.role == "admin":
+            target_email = (req.user_email or "").strip() or None
         else:
-            target_email = user.email or None
+            target_email = (user.email or "").strip() or None
         try:
             res = feishu_push(
                 req.title, req.narrative, req.highlights, req.rows_preview,

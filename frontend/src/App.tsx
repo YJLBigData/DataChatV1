@@ -472,15 +472,37 @@ export default function App() {
                           onPushFeishu={async () => {
                             const r = turn.result;
                             if (!r) return { ok: false, msg: "无结果" };
+                            // 推送策略：
+                            //   · admin 账号（含 admin@feihe.com）通常不是飞鹤真人邮箱，
+                            //     直接用自己的 email 去飞书 batch_get_id 拉不到 open_id → 必失败。
+                            //     所以管理员每次推送必须显式输入目标飞书账号。
+                            //   · 普通用户用自己绑定的飞书邮箱（user.email），后端兜底。
+                            let target_email: string | undefined = undefined;
+                            const isAdmin = user.role === "admin" || /^admin(@|$)/.test(user.username || "");
+                            if (isAdmin) {
+                              const seed = (user.email && user.email.includes("@") && !/^admin(@|$)/.test(user.email)) ? user.email : "";
+                              const input = window.prompt(
+                                "请输入目标飞书账号邮箱（用于推送到对方飞书私信）：",
+                                seed,
+                              );
+                              if (input === null) return { ok: false, msg: "已取消" };
+                              const trimmed = input.trim();
+                              if (!trimmed) return { ok: false, msg: "未输入邮箱" };
+                              if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(trimmed)) {
+                                return { ok: false, msg: "邮箱格式不合法" };
+                              }
+                              target_email = trimmed;
+                            }
                             try {
                               const res = await api.feishuPush({
                                 title: turn.question.slice(0, 30) || "飞鹤经营分析",
                                 narrative: r.answer.narrative,
                                 highlights: r.answer.highlights || [],
                                 rows_preview: (r.answer.table?.display_rows || []).slice(0, 5).map((row) => row.join(" | ")),
+                                ...(target_email ? { user_email: target_email } : {}),
                               });
                               // 后端失败时返回 HTTP 200 + ok:false，必须按 ok 判定，不能只看是否抛错
-                              if (res && res.ok === true) return { ok: true, msg: "✓ 已推送" };
+                              if (res && res.ok === true) return { ok: true, msg: target_email ? `✓ 已推送给 ${target_email}` : "✓ 已推送" };
                               const m = (res && res.user_message) || "推送失败，请稍后重试或联系管理员";
                               return { ok: false, msg: "× " + m.slice(0, 60) };
                             } catch (e: any) {

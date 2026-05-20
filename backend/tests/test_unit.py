@@ -37,8 +37,42 @@ def semantic(cfg):
 def test_semantic_layer_loads_metrics_and_dims(semantic: SemanticLayer):
     assert len(semantic.metrics) >= 19
     assert len(semantic.dimensions) >= 17
-    assert len(semantic.tables) == 5
+    # 5 张汇总 + ads_bi_month_shop_item_dan_detail_df (门店级) = 6
+    assert len(semantic.tables) == 6
     assert len(semantic.calculations) >= 7
+
+
+# --------------------------------------------------------- LLM router json parse
+def test_safe_json_parse_handles_feihe_agent_styles():
+    """飞鹤 kaier_znws Agent 高频输出格式，必须无需 repair pass 就解析成功。"""
+    from app.core.llm.router import _safe_json_parse
+
+    # 1) 纯 JSON
+    assert _safe_json_parse('{"a":1}') == {"a": 1}
+
+    # 2) ```json ... ``` 代码块（最常见）
+    assert _safe_json_parse('```json\n{"a":1,"b":[2,3]}\n```') == {"a": 1, "b": [2, 3]}
+
+    # 3) 前置文字 + 代码块（飞鹤 Agent 经常这么干）
+    txt = '以下是分析结果：\n```json\n{"narrative":"东一区销售额 254 万元","highlights":["Top1: 东一区"]}\n```\n希望对你有帮助！'
+    assert _safe_json_parse(txt) == {
+        "narrative": "东一区销售额 254 万元",
+        "highlights": ["Top1: 东一区"],
+    }
+
+    # 4) 无代码块、前置 + JSON + 尾巴（"以下是结果：{...}希望对你有帮助"）
+    assert _safe_json_parse('以下是：{"x":1,"y":"a"} 希望对你有用') == {"x": 1, "y": "a"}
+
+    # 5) JSON 内字符串里含 } —— 不能被 rfind("}") 截断
+    s = '{"narrative":"差异 = a-b}","highlights":[]}'
+    assert _safe_json_parse(s) == {"narrative": "差异 = a-b}", "highlights": []}
+
+    # 6) 数组顶层
+    assert _safe_json_parse('```\n[1,2,3]\n```') == [1, 2, 3]
+
+    # 7) 完全不是 JSON
+    assert _safe_json_parse("我无法理解你的问题。") is None
+    assert _safe_json_parse("") is None
 
 
 def test_retrieval_index_load_persist_roundtrip(cfg, tmp_path, monkeypatch):
