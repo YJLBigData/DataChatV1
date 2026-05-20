@@ -1,0 +1,46 @@
+# DataChat 依赖清单（Requires Python 3.11）
+# ==================
+
+# Web 框架
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# 数据查询
+duckdb==1.1.3             # 本地 SQL 引擎
+openpyxl==3.1.5           # Excel 读写
+pymysql==1.1.0            # MySQL/AnalyticDB 客户端
+SQLAlchemy>=2.0,<2.1      # 统一元数据库访问层（MySQL/PostgreSQL/SQLite）
+psycopg[binary]>=3.2,<3.3 # PostgreSQL 客户端
+
+# SQL 模板
+Jinja2==3.1.4
+
+# SQL AST 解析（SQL guard 表/列白名单、行级权限注入；安全依赖，必须可用）
+sqlglot>=25.0.0,<26.0.0
+
+# 三层缓存客户端（缺失则缓存降级，不影响启动）
+redis>=5.0.0,<6.0.0
+
+# 语义层配置
+PyYAML==6.0.2
+
+# 图表
+matplotlib==3.9.3
+
+# 飞书
+lark-oapi==1.4.24         # 飞书开放平台 SDK
+
+# 工具
+python-multipart==0.0.18  # 文件上传
+python-dotenv==1.0.1      # 环境变量
+aiofiles==24.1.0          # 异步文件操作
+httpx>=0.27.0             # 异步 HTTP 客户端（飞书 API 调用）
+pycryptodome>=3.20.0      # 飞鹤 ADP AES/ECB/PKCS5Padding 签名
+numpy>=1.24,<2.0          # 数值计算；钉<2：CentOS7(glibc2.17/GCC4.8) 只有 numpy1.x 的 cp311 预编译轮子，numpy2 会源码编译失败
+python-docx==1.1.2        # 商业报告模板解析与 DOCX 报告生成
+playwright>=1.58.0,<2.0.0 # 前端 Playwright 冒烟测试
+pytest==8.3.5             # 自动化测试执行器
+
+# 认证与权限（v1.2 新增）
+bcrypt==4.2.1             # 密码哈希（Argon2/bcrypt，生产安全）
+PyJWT==2.10.1             # JWT 签发与校验（Access Token + Refresh Token）

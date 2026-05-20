@@ -1,0 +1,750 @@
+# DataChat 业务语义层（基于飞鹤 chatbi 真实 5 张表手工建模）
+# ============================================================
+# 设计原则：
+# 1) 指标 metric 是用户口语的"业务量"，绑定唯一表达式与所属表
+# 2) 维度 dimension 是分析切面，明确字段、值域示例、解释
+# 3) 字典 value_dict 把数据库里的代码值翻译为业务术语
+# 4) Join 关系仅在确实需要跨表分析时定义，且只允许等值连接
+# 5) 任何字段必须满足"哪一张表的哪一列、什么含义、是否权限敏感"
+#
+# 时间范围口径：2025-01 ~ 2026-04（按真实数据范围）
+# 数据库：MySQL 本地 chatbi 库
+# ============================================================
+
+version: 2
+profile: chatbi
+default_time_grain: month
+data_range:
+  earliest: "2025-01"
+  latest: "2026-04"
+
+# ----------------------------------------------------------------
+# 数据表 tables
+# ----------------------------------------------------------------
+tables:
+
+  ads_bi_hs_sale_info_df:
+    label: 火山POC明细销售
+    schema: chatbi
+    grain: 单据明细（月-门店-导购-产品）
+    description: |
+      最细粒度的销售明细表。按会计月（acc_month）记录每个门店、导购、产品的销售数量与金额。
+      支持下钻到导购、门店、产品规格层级。当用户问"门店级"、"导购级"、"具体产品规格"时优先用这张表。
+    time_field: acc_month
+    time_format: "YYYY-MM"
+    primary_dimensions:
+      - region
+      - sub_region
+      - city
+      - channel_type
+      - shop_type
+      - dealer
+      - shop
+      - guide
+      - item_series_new
+      - item_stage
+      - item_spec
+      - item
+    measures:
+      - shop_sale_qty_total
+      - shop_sale_amount_total
+      - gd_amount_total
+    notes:
+      - shop_sale_qty 是销售件数；shop_sale_amount 是销售金额（元）
+      - gd_amount 是过单金额（向经销商订货）；与 shop_sale_amount 含义不同
+      - 该表保留分区字段 ds，无需用户感知
+
+  ads_bi_month_shop_item_dan_summary_df:
+    label: 月度门店段位汇总
+    schema: chatbi
+    grain: 月-省区-城市-渠道-段位-圈层
+    description: |
+      管理层日常使用的核心销售汇总表。按月度聚合到省区/城市/渠道/段位/圈层，包含还原过单额与终端销售额。
+      99% 的高管问题（"东一区销售怎么样"、"卓睿系列卖得好不好"）应该首选这张表。
+      不到门店级别，不下钻到导购或单笔。
+    time_field_year: year
+    time_field_month: month
+    time_format: "YYYY + MM 两列拼成 YYYY-MM"
+    primary_dimensions:
+      - region
+      - sub_region
+      - city
+      - big_system_channel
+      - item_series
+      - item_dan
+      - terminal_circle
+    measures:
+      - terminal_sale_amount_total
+      - reduction_gd_sale_amount_total
+    notes:
+      - terminal_sale_amount = 终端实际卖给消费者的金额，是高管最关心的"销售额"
+      - reduction_gd_sale_amount = 还原过单金额（不含货补），衡量经销商订货
+      - year 和 month 都是字符串字段，month 是两位 "01"-"12"
+      - 与 target 表通过 (year, month, lev2_name, lev3_name, big_system_channel_name) 关联做达成率
+
+  ads_bi_month_shop_item_dan_target_summary_df:
+    label: 月度门店段位目标汇总
+    schema: chatbi
+    grain: 月-省区-渠道
+    description: |
+      管理层下达的销售目标与过单目标。该表本身存放目标值与达成实绩，配合 summary 表算达成率。
+      注意维度比 summary 表少：没有城市、段位、圈层维度。
+    time_field_year: year
+    time_field_month: month
+    primary_dimensions:
+      - region
+      - sub_region
+      - big_system_channel
+    measures:
+      - shop_sale_target_total
+      - shop_sale_amount_actual_total
+      - gd_target_total
+      - gd_amount_actual_total
+    notes:
+      - shop_sale_target = 门店销售目标；shop_sale_amount = 实际门店销售金额（与 summary 表口径一致）
+      - gd_target = 过单目标；gd_amount = 实际过单金额
+      - 计算"达成率"必须用 actual / target
+
+  ads_member_first_purchase_new_customer_total_df:
+    label: 首购新客与复购数据
+    schema: chatbi
+    grain: 月-省区-渠道-段位
+    description: |
+      新客首购、60天复购、鹤礼3.0新客与复购汇总。用于会员/新客增长分析。
+      不含金额，仅人数指标。
+    time_field_year: year
+    time_field_month: month
+    primary_dimensions:
+      - region
+      - sub_region
+      - big_system_channel
+      - item_dan
+    measures:
+      - first_purchase_num_total
+      - repurchase_in_60_days_num_total
+      - heli30_new_customer_num_total
+      - heli30_repurchase_in_60_days_num_total
+    notes:
+      - 不要把"新客"和"潜客"混淆，潜客在 ads_precision_nutrition_potential_total_df
+
+  ads_precision_nutrition_potential_total_df:
+    label: 精准营养潜客数据
+    schema: chatbi
+    grain: 月-省区-渠道
+    description: |
+      精准营养项目的潜客与转化人数。用于营销转化分析。
+    time_field_year: year
+    time_field_month: month
+    primary_dimensions:
+      - region
+      - sub_region
+      - big_system_channel
+    measures:
+      - potential_num_total
+      - potential_to_new_num_total
+    notes:
+      - potential_num = 精准潜客人数；potential_to_new_num = 转化为新客的人数
+
+# ----------------------------------------------------------------
+# 维度 dimensions
+# ----------------------------------------------------------------
+dimensions:
+
+  region:
+    label: 大区
+    aliases: [大区, 区域, 战区, 一级区域]
+    table_columns:
+      ads_bi_hs_sale_info_df: lev2_name
+      ads_bi_month_shop_item_dan_summary_df: lev2_name
+      ads_bi_month_shop_item_dan_target_summary_df: lev2_name
+      ads_member_first_purchase_new_customer_total_df: lev2_name
+      ads_precision_nutrition_potential_total_df: lev2_name
+    sample_values: [东一区, 东二区, 中一区, 中二区, 北一区, 南一区, 直辖区, 西一区]
+    description: 飞鹤销售区域第一层（共 8 个大区）
+
+  sub_region:
+    label: 省区
+    aliases: [省区, 省份区域, 二级区域]
+    table_columns:
+      ads_bi_hs_sale_info_df: lev3_name
+      ads_bi_month_shop_item_dan_summary_df: lev3_name
+      ads_bi_month_shop_item_dan_target_summary_df: lev3_name
+      ads_member_first_purchase_new_customer_total_df: lev3_name
+      ads_precision_nutrition_potential_total_df: lev3_name
+    sample_values: [北京, 吉林, 天津, 川南, 粤东, 苏中, 苏北, 豫东, 豫北, 赣北, 辽西, 鄂东, 闽南, 陕西, 鲁北, 黑龙江]
+    description: 飞鹤销售区域第二层，下钻自大区
+
+  city:
+    label: 城市
+    aliases: [城市, 行政市, 地级市]
+    table_columns:
+      ads_bi_hs_sale_info_df: official_city
+      ads_bi_month_shop_item_dan_summary_df: city
+    sample_values: [北京市, 上海市, 哈尔滨市, 长春市, 苏州市, 南通市, 西安市, 厦门市, 泉州市]
+    description: 行政市/城市级别
+
+  channel_type:
+    label: 渠道类型
+    aliases: [渠道, 销售渠道, 渠道编码]
+    table_columns:
+      ads_bi_hs_sale_info_df: channel_type
+    value_dict:
+      "1": 母婴店
+      "2": KA超市
+      "3": 电商
+      "4": 母婴大客户
+      "14": 其他
+    description: 销售业务渠道类型代码
+
+  big_system_channel:
+    label: 大系统渠道
+    aliases: [大系统, 渠道系统, 渠道客户]
+    table_columns:
+      ads_bi_month_shop_item_dan_summary_df: big_system_channel_name
+      ads_bi_month_shop_item_dan_target_summary_df: big_system_channel_name
+      ads_member_first_purchase_new_customer_total_df: big_system_channel_name
+      ads_precision_nutrition_potential_total_df: big_system_channel_name
+    sample_values: [CS00019, CS01967, CS01972, CS01990, CS02047, LS03342, LS06354, LS07589, LS08553]
+    description: 大系统渠道客户编码（CS/LS 等前缀）
+
+  shop_type:
+    label: 门店类型
+    aliases: [门店类别]
+    table_columns:
+      ads_bi_hs_sale_info_df: shop_type
+    sample_values: [专职门店, 无导门店]
+    description: 飞鹤门店类型
+
+  shop:
+    label: 门店
+    aliases: [门店, 店铺, 终端门店]
+    table_columns:
+      ads_bi_hs_sale_info_df: shop_name
+    description: 单门店名称
+    code_column:
+      ads_bi_hs_sale_info_df: shop_code
+
+  guide:
+    label: 导购
+    aliases: [导购, 导购员, 营业员]
+    table_columns:
+      ads_bi_hs_sale_info_df: guide_name
+    description: 门店导购姓名
+    code_column:
+      ads_bi_hs_sale_info_df: guide_code
+
+  dealer:
+    label: 经销商
+    aliases: [经销商, 客户]
+    table_columns:
+      ads_bi_hs_sale_info_df: dealer_name
+    description: 经销商客户名称
+    code_column:
+      ads_bi_hs_sale_info_df: dealer_code
+
+  item:
+    label: 产品
+    aliases: [产品, 商品, SKU]
+    table_columns:
+      ads_bi_hs_sale_info_df: item_name
+    description: 产品（SKU）名称
+    code_column:
+      ads_bi_hs_sale_info_df: item_code
+
+  item_series:
+    label: 产品系列
+    aliases: [产品系列, 系列, 品系]
+    table_columns:
+      ads_bi_hs_sale_info_df: item_series_new
+      ads_bi_month_shop_item_dan_summary_df: item_series_new_name
+    sample_values:
+      - 卓睿
+      - 星飞帆卓耀铂金（有机A2 β-酪蛋白）
+      - 星飞帆经典1-3段
+      - 淳芮有机
+      - 臻爱倍护-全渠道
+      - 臻爱飞帆
+      - 茁然-奶粉4段
+      - 飞帆呵护
+      - 飞鹤牧场-经典
+    description: 飞鹤产品系列
+
+  item_dan:
+    label: 段位
+    aliases: [段位, 产品段位, 配方段位]
+    table_columns:
+      ads_bi_hs_sale_info_df: item_stage
+      ads_bi_month_shop_item_dan_summary_df: item_dan_name
+      ads_member_first_purchase_new_customer_total_df: item_dan_name
+    sample_values: [1段, 2段, 3段, 4段, 儿童, 成人]
+    description: 婴幼儿配方奶粉的段位划分
+
+  item_spec:
+    label: 产品规格
+    aliases: [规格, 罐型]
+    table_columns:
+      ads_bi_hs_sale_info_df: item_spec
+    sample_values: [大听, 中听, 小听]
+    description: 罐装规格
+
+  terminal_circle:
+    label: 圈层等级
+    aliases: [圈层, 终端圈层, 终端等级]
+    table_columns:
+      ads_bi_month_shop_item_dan_summary_df: terminal_circle_level
+    sample_values: [基础终端, 成长终端, 核心终端, "潜力终端-定制品"]
+    description: 终端门店圈层分级
+
+  business_representative:
+    label: 业务代表
+    aliases: [业务代表, BR]
+    table_columns:
+      ads_bi_hs_sale_info_df: business_representative_name
+    code_column:
+      ads_bi_hs_sale_info_df: business_representative_code
+
+  area_manager:
+    label: 地区经理
+    aliases: [地区经理, 经理]
+    table_columns:
+      ads_bi_hs_sale_info_df: lev4_name_manager_name
+    code_column:
+      ads_bi_hs_sale_info_df: lev4_name_manager_code
+
+  is_guide_shop:
+    label: 是否有导门店
+    aliases: [有导, 是否有导]
+    table_columns:
+      ads_bi_hs_sale_info_df: is_guide_shop
+    sample_values: ["是", "否"]
+
+# ----------------------------------------------------------------
+# 时间维度（特殊处理）
+# ----------------------------------------------------------------
+time_dimensions:
+  acc_month:
+    label: 会计月
+    table_columns:
+      ads_bi_hs_sale_info_df: acc_month
+    granularity: month
+    format: "YYYY-MM"
+  ym_year_month:
+    label: 年-月
+    composite: true
+    table_columns:
+      ads_bi_month_shop_item_dan_summary_df: [year, month]
+      ads_bi_month_shop_item_dan_target_summary_df: [year, month]
+      ads_member_first_purchase_new_customer_total_df: [year, month]
+      ads_precision_nutrition_potential_total_df: [year, month]
+    granularity: month
+    format: "year=YYYY AND month=MM"
+
+# ----------------------------------------------------------------
+# 指标 metrics
+# ----------------------------------------------------------------
+metrics:
+
+  # ===== 销售额类（管理层最常问） =====
+  terminal_sale_amount_total:
+    label: 终端销售额
+    aliases: [终端销售额, 终端销售金额, 销售额, 销售金额, 业绩, 营收, 销售实绩]
+    table: ads_bi_month_shop_item_dan_summary_df
+    expression: "SUM(terminal_sale_amount)"
+    unit: 元
+    display_format: currency_cn
+    decimals: 2
+    higher_is_better: true
+    description: 终端门店实际销售给消费者的金额合计。是飞鹤管理层默认的"销售额"主指标。
+    domain: sales
+    typical_dimensions: [region, sub_region, city, big_system_channel, item_series, item_dan, terminal_circle]
+    typical_questions:
+      - 本月销售额怎么样
+      - 各大区销售排名
+      - 卓睿系列销售如何
+
+  shop_sale_amount_total:
+    label: 门店销售金额
+    aliases: [门店销售额, 门店业绩, 门店销售]
+    table: ads_bi_hs_sale_info_df
+    expression: "SUM(shop_sale_amount)"
+    unit: 元
+    display_format: currency_cn
+    decimals: 2
+    higher_is_better: true
+    description: 来自火山POC销售明细的门店销售金额。当用户需要下钻到门店、导购、单产品级时使用。
+    domain: sales
+    typical_dimensions: [region, sub_region, city, channel_type, shop_type, dealer, shop, guide, item_series, item_stage, item]
+    typical_questions:
+      - 哪些导购卖得最好
+      - 某个门店的销售情况
+
+  shop_sale_qty_total:
+    label: 门店销售件数
+    aliases: [销售件数, 销量, 销售数量]
+    table: ads_bi_hs_sale_info_df
+    expression: "SUM(shop_sale_qty)"
+    unit: 件
+    display_format: integer_cn
+    decimals: 0
+    higher_is_better: true
+    description: 来自火山POC销售明细的门店销售件数。
+    domain: sales
+    typical_dimensions: [region, sub_region, city, channel_type, item_series, item_stage, item]
+
+  gd_amount_total:
+    label: 过单金额（明细）
+    aliases: [过单金额, 经销商过单, 订货金额]
+    table: ads_bi_hs_sale_info_df
+    expression: "SUM(gd_amount)"
+    unit: 元
+    display_format: currency_cn
+    description: 火山POC明细表的过单金额合计。当用户问"经销商订货"、"过单额"时使用。
+    domain: distribution
+
+  reduction_gd_sale_amount_total:
+    label: 还原过单金额（不含货补）
+    aliases: [还原过单, 过单额, 经销商过单额, 不含货补过单]
+    table: ads_bi_month_shop_item_dan_summary_df
+    expression: "SUM(reduction_gd_sale_amount)"
+    unit: 元
+    display_format: currency_cn
+    description: 月度汇总表的还原过单金额（不含货补）。高管常用的"过单"主指标。
+    domain: distribution
+    typical_dimensions: [region, sub_region, city, big_system_channel, item_series, item_dan, terminal_circle]
+
+  # ===== 目标与达成率 =====
+  shop_sale_target_total:
+    label: 门店销售目标
+    aliases: [销售目标, 月度销售目标]
+    table: ads_bi_month_shop_item_dan_target_summary_df
+    expression: "SUM(shop_sale_target)"
+    unit: 元
+    display_format: currency_cn
+    domain: target
+    description: 月度下达的门店销售目标。
+
+  shop_sale_amount_actual_total:
+    label: 门店销售实绩（目标表口径）
+    aliases: [销售实绩, 实际销售]
+    table: ads_bi_month_shop_item_dan_target_summary_df
+    expression: "SUM(shop_sale_amount)"
+    unit: 元
+    display_format: currency_cn
+    domain: target
+
+  gd_target_total:
+    label: 过单目标
+    aliases: [过单目标, 经销商订货目标]
+    table: ads_bi_month_shop_item_dan_target_summary_df
+    expression: "SUM(gd_target)"
+    unit: 元
+    display_format: currency_cn
+    domain: target
+
+  gd_amount_actual_total:
+    label: 过单实绩（目标表口径）
+    aliases: [过单实绩, 实际过单]
+    table: ads_bi_month_shop_item_dan_target_summary_df
+    expression: "SUM(gd_amount)"
+    unit: 元
+    display_format: currency_cn
+    domain: target
+
+  shop_sale_achievement_rate:
+    label: 门店销售达成率
+    aliases: [门店达成率, 销售达成率, 达成率]
+    table: ads_bi_month_shop_item_dan_target_summary_df
+    expression: "SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: target
+    typical_dimensions: [region, sub_region, big_system_channel]
+    description: 销售实绩 / 销售目标，反映完成情况。
+
+  gd_achievement_rate:
+    label: 过单达成率
+    aliases: [过单达成率, 订货达成率]
+    table: ads_bi_month_shop_item_dan_target_summary_df
+    expression: "SUM(gd_amount) / NULLIF(SUM(gd_target), 0)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: target
+
+  # ===== 新客与复购 =====
+  first_purchase_num_total:
+    label: 首购人数
+    aliases: [首购人数, 新客数, 首单人数]
+    table: ads_member_first_purchase_new_customer_total_df
+    expression: "SUM(first_purchase_num)"
+    unit: 人
+    display_format: integer_cn
+    domain: member
+    higher_is_better: true
+
+  repurchase_in_60_days_num_total:
+    label: 60天复购人数
+    aliases: [60天复购, 复购人数]
+    table: ads_member_first_purchase_new_customer_total_df
+    expression: "SUM(repurchase_in_60_days_num)"
+    unit: 人
+    display_format: integer_cn
+    domain: member
+    higher_is_better: true
+
+  repurchase_rate_60d:
+    label: 60天复购率
+    aliases: [复购率, 60天复购率]
+    table: ads_member_first_purchase_new_customer_total_df
+    expression: "SUM(repurchase_in_60_days_num) / NULLIF(SUM(first_purchase_num), 0)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    domain: member
+    higher_is_better: true
+
+  heli30_new_customer_num_total:
+    label: 鹤礼3.0新客数
+    table: ads_member_first_purchase_new_customer_total_df
+    expression: "SUM(heli30_new_customer_num)"
+    unit: 人
+    display_format: integer_cn
+    domain: member
+
+  heli30_repurchase_in_60_days_num_total:
+    label: 鹤礼3.0 60天复购数
+    table: ads_member_first_purchase_new_customer_total_df
+    expression: "SUM(heli30_repurchase_in_60_days_num)"
+    unit: 人
+    display_format: integer_cn
+    domain: member
+
+  # ===== 精准营养 =====
+  potential_num_total:
+    label: 精准潜客人数
+    aliases: [精准潜客, 潜客人数]
+    table: ads_precision_nutrition_potential_total_df
+    expression: "SUM(potential_num)"
+    unit: 人
+    display_format: integer_cn
+    domain: marketing
+
+  potential_to_new_num_total:
+    label: 潜客转新客人数
+    aliases: [转新人数, 潜客转化]
+    table: ads_precision_nutrition_potential_total_df
+    expression: "SUM(potential_to_new_num)"
+    unit: 人
+    display_format: integer_cn
+    domain: marketing
+
+  potential_to_new_rate:
+    label: 潜客转新率
+    aliases: [转化率, 潜客转化率]
+    table: ads_precision_nutrition_potential_total_df
+    expression: "SUM(potential_to_new_num) / NULLIF(SUM(potential_num), 0)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    domain: marketing
+    higher_is_better: true
+
+# ----------------------------------------------------------------
+# 计算/对比口径（同比、环比、占比、Top N、累计）
+# ----------------------------------------------------------------
+calculations:
+  yoy_growth:
+    label: 同比增长
+    aliases: [同比, 同比增长率, 同比增速]
+    formula: "(本期 - 去年同期) / 去年同期"
+  mom_growth:
+    label: 环比增长
+    aliases: [环比, 环比增长率]
+    formula: "(本期 - 上月) / 上月"
+  ratio:
+    label: 占比
+    aliases: [占比, 比例, 比重]
+    formula: "分组金额 / 总金额"
+  rank:
+    label: 排名
+    aliases: [排名, 排行, TopN, 前几名, 后几名]
+  trend:
+    label: 趋势
+    aliases: [趋势, 走势, 变化]
+  delta:
+    label: 差值
+    aliases: [差值, 差距, 差额]
+  cumulative:
+    label: 累计
+    aliases: [累计, 累积, 累计至今]
+
+# ----------------------------------------------------------------
+# 表关联 joins（仅当跨表分析时启用）
+# ----------------------------------------------------------------
+joins:
+  summary_target:
+    left: ads_bi_month_shop_item_dan_summary_df
+    right: ads_bi_month_shop_item_dan_target_summary_df
+    on:
+      - [year, year]
+      - [month, month]
+      - [lev2_name, lev2_name]
+      - [lev3_name, lev3_name]
+      - [big_system_channel_name, big_system_channel_name]
+    notes: 用于"销售实绩 vs 目标 / 达成率"的对比分析
+    safe: true
+
+  summary_member:
+    left: ads_bi_month_shop_item_dan_summary_df
+    right: ads_member_first_purchase_new_customer_total_df
+    on:
+      - [year, year]
+      - [month, month]
+      - [lev2_name, lev2_name]
+      - [lev3_name, lev3_name]
+      - [big_system_channel_name, big_system_channel_name]
+      - [item_dan_name, item_dan_name]
+    notes: 销售额结合新客人数分析
+    safe: true
+
+  summary_potential:
+    left: ads_bi_month_shop_item_dan_summary_df
+    right: ads_precision_nutrition_potential_total_df
+    on:
+      - [year, year]
+      - [month, month]
+      - [lev2_name, lev2_name]
+      - [lev3_name, lev3_name]
+      - [big_system_channel_name, big_system_channel_name]
+    notes: 销售结合潜客分析
+    safe: true
+
+# ----------------------------------------------------------------
+# Few-shot 示例（高质量问答样本）
+# ----------------------------------------------------------------
+few_shots:
+  - question: 本月销售额是多少
+    intent:
+      metric: terminal_sale_amount_total
+      time_range:
+        kind: relative
+        period: this_month
+      group_by: []
+    sql_hint: |
+      SELECT SUM(terminal_sale_amount) AS terminal_sale_amount_total
+      FROM ads_bi_month_shop_item_dan_summary_df
+      WHERE year='2026' AND month='04'
+
+  - question: 各大区销售额排名
+    intent:
+      metric: terminal_sale_amount_total
+      time_range:
+        kind: relative
+        period: this_month
+      group_by: [region]
+      order_by: [{field: terminal_sale_amount_total, dir: desc}]
+    sql_hint: |
+      SELECT lev2_name AS region, SUM(terminal_sale_amount) AS terminal_sale_amount_total
+      FROM ads_bi_month_shop_item_dan_summary_df
+      WHERE year='2026' AND month='04'
+      GROUP BY lev2_name
+      ORDER BY terminal_sale_amount_total DESC
+      LIMIT 100
+
+  - question: 东一区 1 季度销售情况
+    intent:
+      metric: terminal_sale_amount_total
+      time_range:
+        kind: absolute
+        year: '2026'
+        months: ['01','02','03']
+      filters:
+        region: 东一区
+      group_by: [month]
+    sql_hint: |
+      SELECT month, SUM(terminal_sale_amount) AS terminal_sale_amount_total
+      FROM ads_bi_month_shop_item_dan_summary_df
+      WHERE year='2026' AND month IN ('01','02','03') AND lev2_name='东一区'
+      GROUP BY month
+      ORDER BY month
+
+  - question: 1 段产品的销售情况
+    intent:
+      metric: terminal_sale_amount_total
+      time_range:
+        kind: relative
+        period: this_month
+      filters:
+        item_dan: 1段
+      group_by: [region]
+
+  - question: 销售目标完成的怎么样
+    intent:
+      metric: shop_sale_achievement_rate
+      time_range:
+        kind: relative
+        period: this_month
+      group_by: [region]
+
+  - question: 各大区销售同比情况
+    intent:
+      metric: terminal_sale_amount_total
+      calculation: yoy_growth
+      time_range:
+        kind: relative
+        period: this_month
+      group_by: [region]
+
+  - question: 这个月新客人数是多少
+    intent:
+      metric: first_purchase_num_total
+      time_range:
+        kind: relative
+        period: this_month
+
+  - question: 各大区 60 天复购率
+    intent:
+      metric: repurchase_rate_60d
+      time_range:
+        kind: relative
+        period: this_month
+      group_by: [region]
+
+  - question: 卓睿系列卖得怎么样
+    intent:
+      metric: terminal_sale_amount_total
+      time_range:
+        kind: relative
+        period: this_month
+      filters:
+        item_series: 卓睿
+
+  - question: 终端销售排名前 5 的城市
+    intent:
+      metric: terminal_sale_amount_total
+      time_range:
+        kind: relative
+        period: this_month
+      group_by: [city]
+      order_by: [{field: terminal_sale_amount_total, dir: desc}]
+      limit: 5
+
+# ----------------------------------------------------------------
+# 同义词字典（用户口语 → 标准术语）
+# ----------------------------------------------------------------
+synonyms:
+  "本月": "当前月份"
+  "上个月": "上月"
+  "去年同期": "上年同月"
+  "环比": "和上月对比"
+  "同比": "和去年同月对比"
+  "卖得好": "销售额排名靠前"
+  "卖得不好": "销售额排名靠后"
+  "拖后腿": "销售额垫底"
+  "下钻": "细分到下一级"
+  "看一下": "查询"
+  "怎么样": "查询当前业绩"
+  "情况如何": "查询当前业绩"
