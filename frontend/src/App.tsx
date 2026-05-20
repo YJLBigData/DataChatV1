@@ -92,6 +92,39 @@ export default function App() {
   const [pwdOpen, setPwdOpen] = useState(false);
   const [reportFor, setReportFor] = useState<ChatTurn | null>(null);
 
+  /* --------------- LLM provider 切换（右上角下拉，每次 chat 请求都传） --------------- */
+  type LLMProvider = { id: string; label: string; hint: string };
+  const [llmProviders, setLlmProviders] = useState<LLMProvider[]>([]);
+  const [llmDefault, setLlmDefault] = useState<string>("");
+  const LLM_STORAGE_KEY = "datachatv1:llm_provider";
+  const [llmChoice, setLlmChoice] = useState<string>(
+    () => (typeof window !== "undefined" && localStorage.getItem(LLM_STORAGE_KEY)) || "",
+  );
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.listLLMProviders();
+        if (cancelled) return;
+        setLlmProviders(r.available || []);
+        setLlmDefault(r.default || "");
+        // 用户没显式选过、或本地存的 id 在服务器侧已不存在 → 用 server default
+        setLlmChoice((cur) => {
+          const ids = (r.available || []).map((x) => x.id);
+          if (cur && ids.includes(cur)) return cur;
+          return r.default || ids[0] || "";
+        });
+      } catch {
+        /* 拉不到列表不阻塞主流程；后端会用 env 默认 */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user]);
+  useEffect(() => {
+    if (llmChoice) localStorage.setItem(LLM_STORAGE_KEY, llmChoice);
+  }, [llmChoice]);
+
   /* ----------------------------- 401 handling ------------------------------ */
   useEffect(() => {
     const fn = () => {
@@ -224,7 +257,7 @@ export default function App() {
       };
 
       const handle = api.stream(
-        { question: q, conversation_id: activeId, force_refresh: forceRefresh },
+        { question: q, conversation_id: activeId, force_refresh: forceRefresh, llm_provider: llmChoice || undefined },
         (evt) => {
           // session 事件：把 draft 迁移到真实 cid（如果当前 owner 是 draft）
           if (evt.stage === "session" && evt.payload?.conversation_id && currentCid === DRAFT_KEY) {
@@ -290,7 +323,7 @@ export default function App() {
       );
       streamHandles.current[currentCid] = handle;
     },
-    [input, activeId, forceRefresh, user, streamingConvs, updateTurnsForConv, refreshConversations],
+    [input, activeId, forceRefresh, user, streamingConvs, updateTurnsForConv, refreshConversations, llmChoice],
   );
 
   const startNew = useCallback(() => {
@@ -370,14 +403,38 @@ export default function App() {
 
   const headerHealth = useMemo(() => {
     if (!boot) return null;
+    const hasChoices = llmProviders.length >= 2;
+    const current = llmProviders.find((p) => p.id === llmChoice);
     return (
       <div className="flex flex-wrap items-center gap-2 text-[11px]">
-        <span className="qq-pill-blue">{boot.model.name}</span>
+        {hasChoices ? (
+          <label
+            className="qq-pill-blue !cursor-pointer !py-0 !pr-1 inline-flex items-center gap-1"
+            title={current?.hint || "切换大模型 provider（仅本次会话本地保存）"}
+          >
+            <span>🤖</span>
+            <select
+              className="bg-transparent text-[11px] font-medium outline-none cursor-pointer pr-1"
+              value={llmChoice}
+              onChange={(e) => setLlmChoice(e.target.value)}
+            >
+              {llmProviders.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}{p.id === llmDefault ? "（默认）" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <span className="qq-pill-blue" title={current?.hint || ""}>
+            {current?.label || boot.model.name}
+          </span>
+        )}
         <span className="qq-pill-grey">{boot.metrics_count} 指标 · {boot.tables_count} 表</span>
         <span className="qq-pill-grey">数据 {boot.data_range[0]} ~ {boot.data_range[1]}</span>
       </div>
     );
-  }, [boot]);
+  }, [boot, llmProviders, llmChoice, llmDefault]);
 
   /* ------------------------------- early states ---------------------------- */
   if (bootError) {

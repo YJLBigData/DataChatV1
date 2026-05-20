@@ -8,14 +8,63 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 import httpx
 
 from app.core.config import LLMConfig, V1Config, load_config
+
+# 请求级模型路由 override：右上角下拉框选择"百炼 / 飞鹤"时由 main.py 在请求入口设置，
+# 通过 ContextVar 自动在 asyncio / SSE 流式调用栈里传播，不需要在 5+ 个方法签名里硬塞参数。
+_provider_override: ContextVar[str | None] = ContextVar(
+    "datachat_llm_provider_override", default=None,
+)
+
+
+def set_request_provider(provider: str | None) -> None:
+    """请求入口调用，设置本次请求的 LLM provider（'bailian' / 'feihe' / None=用 env 默认）。"""
+    norm = (provider or "").strip().lower() or None
+    _provider_override.set(norm)
+
+
+def get_request_provider() -> str | None:
+    return _provider_override.get()
+
+
+def available_providers() -> list[dict[str, Any]]:
+    """探测当前环境配置允许哪些 provider，给前端下拉框用。不暴露 key 值。"""
+    cfg = load_config()
+    out: list[dict[str, Any]] = []
+    # 百炼直连：要 DASHSCOPE_API_KEY（或 cfg.llm.bailian_api_key）
+    bailian_key = (os.environ.get("DASHSCOPE_API_KEY") or cfg.llm.bailian_api_key or "").strip()
+    if bailian_key:
+        out.append({
+            "id": "bailian",
+            "label": f"百炼 · {cfg.llm.bailian_chat_model}",
+            "hint": "DashScope 直连，单次 ~10s；走你的 AK，业务数据会发到阿里云。",
+        })
+    # 飞鹤公司网关：要 AES_KEY + URL
+    try:
+        from app.core.llm.feihe_gateway import FeiheGatewayClient
+        c = FeiheGatewayClient()
+        if c.configured:
+            out.append({
+                "id": "feihe",
+                "label": f"飞鹤 · {c.agent_code}",
+                "hint": "公司 ADP Agent，业务数据不出公司网；单次 ~30-120s。",
+            })
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def default_provider() -> str:
+    return (os.environ.get("LLM_PROVIDER") or load_config().llm.primary_provider or "feihe").strip().lower()
 
 logger = logging.getLogger("datachat.llm")
 
@@ -56,8 +105,12 @@ class LLMRouter:
     # --------------------------------------------------------- provider switch
 
     def _use_feihe(self) -> bool:
-        import os
-        prov = (os.environ.get("LLM_PROVIDER") or self.cfg.llm.primary_provider or "").strip().lower()
+        # 路由优先级：① 本次请求 override（前端右上角下拉） ② env LLM_PROVIDER ③ config primary
+        override = _provider_override.get()
+        if override:
+            prov = override
+        else:
+            prov = (os.environ.get("LLM_PROVIDER") or self.cfg.llm.primary_provider or "").strip().lower()
         if prov != "feihe":
             return False
         try:

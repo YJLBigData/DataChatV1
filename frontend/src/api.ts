@@ -255,8 +255,15 @@ export const api = {
     jsonReq<{ ok: boolean }>(`/api/conversations/${cid}`, { method: "DELETE" }),
 
   /* ---------- 问数（同步 + 流式） ---------- */
-  chat: (req: { question: string; conversation_id?: string | null; force_refresh?: boolean }) =>
+  chat: (req: { question: string; conversation_id?: string | null; force_refresh?: boolean; llm_provider?: string | null }) =>
     jsonReq<ChatResult>("/api/chat", { method: "POST", body: JSON.stringify(req) }),
+
+  /* ---------- LLM 模型 ---------- */
+  listLLMProviders: () =>
+    jsonReq<{
+      available: { id: string; label: string; hint: string }[];
+      default: string;
+    }>("/api/llm/providers"),
 
   /* ---------- 飞书 ---------- */
   feishuPush: (req: {
@@ -276,7 +283,7 @@ export const api = {
 
   /* ---------- SSE 流式问数 ---------- */
   stream: (
-    req: { question: string; conversation_id?: string | null; force_refresh?: boolean },
+    req: { question: string; conversation_id?: string | null; force_refresh?: boolean; llm_provider?: string | null },
     onEvent: (evt: StageEvent) => void,
     onDone: (result: ChatResult) => void,
     onError: (err: string) => void,

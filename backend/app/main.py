@@ -109,6 +109,8 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
     force_refresh: bool = False
     skip_llm_narrative: bool = False
+    # 右上角下拉框选的模型，None=用 env 默认（线上=feihe）
+    llm_provider: Optional[str] = None
 
 
 class ConversationCreateReq(BaseModel):
@@ -663,10 +665,23 @@ def create_app() -> FastAPI:
         )
         return {"ok": True}
 
+    # ============================================================ llm providers
+    @app.get("/api/llm/providers")
+    def api_llm_providers(_user: User = Depends(require_user)) -> dict[str, Any]:
+        """右上角下拉框用：列出本环境**已配置**的 LLM provider + 默认值。
+        不返回任何 key/secret 明文。"""
+        from app.core.llm.router import available_providers, default_provider
+        return {
+            "available": available_providers(),
+            "default": default_provider(),
+        }
+
     # ============================================================ chat
 
     @app.post("/api/chat")
     def api_chat(req: ChatRequest = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
+        from app.core.llm.router import set_request_provider
+        set_request_provider(req.llm_provider)
         return _do_chat(get_pipe(), get_conversation_store(), user, req, on_event=None)
 
     @app.post("/api/chat/stream")
@@ -698,8 +713,15 @@ def create_app() -> FastAPI:
             except Exception:
                 pass
 
+        # ContextVar 默认在主线程设置后**不会**穿透到 run_in_executor 的工作线程；
+        # 这里改成在 worker 内显式 set，保证 pipeline → planner → answerer → llm.chat
+        # 整条调用栈都能看到本次请求选的 provider。
+        from app.core.llm.router import set_request_provider as _set_provider
+        chosen_provider = req.llm_provider  # capture before worker runs (avoid req lifetime issues)
+
         def worker() -> None:
             try:
+                _set_provider(chosen_provider)
                 payload = _do_chat(pipe, store, user, req, on_event=on_event)
                 loop.call_soon_threadsafe(queue.put_nowait, ("done", payload))
             except Exception as exc:
