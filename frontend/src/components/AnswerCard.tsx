@@ -117,7 +117,27 @@ export function AnswerCard({ turn, onPickSuggestion, onPickClarify, onPushFeishu
             <span className="text-xs text-slate-400">共 {answer.table?.row_count ?? 0} 行</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="qq-pill-grey">{result.cached ? "命中缓存" : `${result.elapsed_ms} ms`}</span>
+            {result.cached ? (
+              <span className="qq-pill-grey">命中缓存</span>
+            ) : (
+              (() => {
+                const totalS = (result.elapsed_ms / 1000).toFixed(2);
+                // 把所有"等待 LLM"阶段（plan / answer）的耗时累加
+                const llmMs = (turn.events || []).reduce((acc, ev) => {
+                  const w = (ev.payload as any)?.llm_wait_ms;
+                  return acc + (typeof w === "number" ? w : 0);
+                }, 0);
+                const llmS = (llmMs / 1000).toFixed(2);
+                return (
+                  <>
+                    <span className="qq-pill-grey" title="后端从收到问题到返回答案的总耗时">总耗时 {totalS}s</span>
+                    {llmMs > 0 && (
+                      <span className="qq-pill-grey" title="其中等待大模型反馈（规划 + 整理）累计耗时">🤖 LLM {llmS}s</span>
+                    )}
+                  </>
+                );
+              })()
+            )}
             {result.plan?.calculation && <span className="qq-pill-blue">{result.plan.calculation}</span>}
           </div>
         </div>

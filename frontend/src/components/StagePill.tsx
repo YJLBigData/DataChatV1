@@ -12,11 +12,24 @@ const STAGE_LABEL: Record<string, string> = {
   clarify: "需要澄清",
 };
 
+// 哪些阶段实际等待大模型反馈（高亮显示）。
+// plan = LLM 规划 QueryPlan；answer = LLM 生成中文 narrative。
+const LLM_STAGES = new Set(["plan", "answer"]);
+
 const STAGES_ORDER = ["cache", "retrieval", "plan", "compile", "guard", "execute", "answer"];
 
 interface Props {
   events: StageEvent[];
   pending: boolean;
+}
+
+/** 把毫秒格式化成"秒"。<1s 显示一位小数，≥1s 显示两位有效数字。 */
+function fmtSec(ms: number): string {
+  if (!ms || ms <= 0) return "";
+  const s = ms / 1000;
+  if (s < 1) return `${s.toFixed(2)}s`;
+  if (s < 10) return `${s.toFixed(2)}s`;
+  return `${s.toFixed(1)}s`;
 }
 
 export function StagePill({ events, pending }: Props) {
@@ -43,11 +56,14 @@ export function StagePill({ events, pending }: Props) {
             : finished
               ? "qq-stage-done"
               : "qq-stage-active";
+        const isLLM = LLM_STAGES.has(s);
+        const sec = fmtSec(e.elapsed_ms);
         return (
-          <span key={s} className={`qq-stage-pill ${cls}`}>
+          <span key={s} className={`qq-stage-pill ${cls}`} title={isLLM ? "等待大模型反馈" : undefined}>
             <span className="qq-dot" style={{ background: "currentColor", opacity: 0.5 }} />
             {STAGE_LABEL[s] || s}
-            {e.elapsed_ms ? ` · ${e.elapsed_ms}ms` : null}
+            {isLLM && <span className="ml-1 text-[10px] opacity-75">🤖</span>}
+            {sec ? ` · ${sec}` : null}
           </span>
         );
       })}

@@ -188,12 +188,16 @@ class Pipeline:
             "dimensions": [c.name for c in plan_result.bundle.dimensions[:3]],
             "tables": [c.name for c in plan_result.bundle.tables[:3]],
         }, plan_result.bundle.elapsed_ms)
+        # plan_result.elapsed_ms 是 Planner.build() 总时长（含语义召回），retrieval 已单独
+        # 上报；这里只汇报 plan 净时长（≈ LLM 规划 + 规则修复），避免和 retrieval 重复计时。
+        plan_only_ms = max(0, plan_result.elapsed_ms - plan_result.bundle.elapsed_ms)
         emit("plan", "ok", {
             "metric": plan_result.plan.metric,
             "calculation": plan_result.plan.calculation,
             "needs_clarify": plan_result.plan.needs_clarify,
             "confidence": plan_result.plan.confidence,
-        }, plan_result.elapsed_ms)
+            "llm_wait_ms": plan_only_ms,
+        }, plan_only_ms)
 
         plan = plan_result.plan
 
@@ -349,7 +353,11 @@ class Pipeline:
         # Stage 7: answer
         answer_started = time.perf_counter()
         answer_payload = self.answerer.build(question_clean, plan, meta, exec_obj, guarded_sql, skip_llm=skip_llm_narrative)
-        emit("answer", "ok", {"chart": (answer_payload.get("chart") or {}).get("type")}, int((time.perf_counter() - answer_started) * 1000))
+        answer_ms = int((time.perf_counter() - answer_started) * 1000)
+        emit("answer", "ok", {
+            "chart": (answer_payload.get("chart") or {}).get("type"),
+            "llm_wait_ms": 0 if skip_llm_narrative else answer_ms,
+        }, answer_ms)
 
         elapsed = int((time.perf_counter() - run_started) * 1000)
         # cache L1 question (only happy path)
