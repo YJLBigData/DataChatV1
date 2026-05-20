@@ -41,6 +41,93 @@ def test_semantic_layer_loads_metrics_and_dims(semantic: SemanticLayer):
     assert len(semantic.calculations) >= 7
 
 
+def test_retrieval_index_load_persist_roundtrip(cfg, tmp_path, monkeypatch):
+    """retrieval_index/ 持久化往返：构建 → 落盘 → 重新加载，不联网。
+
+    用 stub LLM 制造确定性向量，避免依赖真实百炼 API。同时验证 fingerprint
+    机制：semantic.yaml 不变就吃缓存；改了就强制重建。
+    """
+    import json as _json
+    import numpy as np
+    from app.core.retrieval import hybrid as hybrid_mod
+    from app.core.retrieval.hybrid import HybridRetriever
+
+    # 把索引目录指到 tmp_path，避免污染仓库里真实的 retrieval_index/
+    monkeypatch.setattr(hybrid_mod, "INDEX_DIR", tmp_path)
+    monkeypatch.setattr(hybrid_mod, "INDEX_MATRIX", tmp_path / "embed_matrix.npy")
+    monkeypatch.setattr(hybrid_mod, "INDEX_DOCS", tmp_path / "docs.json")
+    monkeypatch.setattr(hybrid_mod, "INDEX_META", tmp_path / "meta.json")
+
+    class _StubLLM:
+        class _Inner:
+            bailian_embed_model = "stub-embed-v1"
+        llm = _Inner()
+        embedding_dim = 8
+
+        def embed(self, texts, *, model=None):
+            # 确定性："i 位置 hash(text)→向量"，便于断言
+            out = []
+            for t in texts:
+                h = hash(t) & 0xFFFFFFFF
+                vec = np.array([(h >> (i * 4)) & 0xF for i in range(8)], dtype=float)
+                if vec.sum() == 0:
+                    vec[0] = 1.0
+                out.append(list(vec / np.linalg.norm(vec)))
+            return out
+
+    class _StubCache:
+        def get_embedding(self, *a, **kw): return None
+        def set_embedding(self, *a, **kw): pass
+
+    sem = SemanticLayer(cfg.app.semantic_path)
+    r = HybridRetriever(sem)
+    r.llm = _StubLLM()      # type: ignore[assignment]
+    r.cache = _StubCache()  # type: ignore[assignment]
+
+    # 第 1 次构建：磁盘空 → 走 API（_StubLLM）→ 落盘
+    r.build()
+    assert r._embed_matrix is not None
+    assert (tmp_path / "embed_matrix.npy").exists()
+    assert (tmp_path / "docs.json").exists()
+    assert (tmp_path / "meta.json").exists()
+    meta = _json.loads((tmp_path / "meta.json").read_text())
+    assert meta["model"] == "stub-embed-v1"
+    assert meta["doc_count"] == len(r._docs) > 0
+    n_docs = meta["doc_count"]
+    fp1 = meta["semantic_hash"]
+
+    # 第 2 次构建：磁盘已有 + fingerprint 匹配 → 走加载路径，不调 stub.embed
+    calls = {"embed": 0}
+    original = _StubLLM.embed
+    def counting_embed(self, texts, *, model=None):
+        calls["embed"] += 1
+        return original(self, texts, model=model)
+    _StubLLM.embed = counting_embed  # type: ignore[assignment]
+
+    r2 = HybridRetriever(sem)
+    r2.llm = _StubLLM()      # type: ignore[assignment]
+    r2.cache = _StubCache()  # type: ignore[assignment]
+    r2.build()
+    assert calls["embed"] == 0, "fingerprint 匹配时不应该再调 embedding API"
+    assert r2._embed_matrix is not None
+    assert r2._embed_matrix.shape[0] == n_docs
+    assert len(r2._docs) == n_docs
+
+    # 第 3 次构建：模拟 semantic.yaml 变了 → fingerprint 失效 → 必须重建
+    r3 = HybridRetriever(sem)
+    r3.llm = _StubLLM()      # type: ignore[assignment]
+    r3.cache = _StubCache()  # type: ignore[assignment]
+    # 篡改 fingerprint：直接改 meta.json 的 semantic_hash
+    bad_meta = dict(meta); bad_meta["semantic_hash"] = "deadbeefdeadbeef"
+    (tmp_path / "meta.json").write_text(_json.dumps(bad_meta))
+    calls["embed"] = 0
+    r3.build()
+    assert calls["embed"] >= 1, "fingerprint 不匹配必须重新调 embedding API"
+    # 重建后 meta.json 又写回当前 fingerprint
+    meta_after = _json.loads((tmp_path / "meta.json").read_text())
+    assert meta_after["semantic_hash"] == fp1
+
+
 def test_semantic_schema_overrides_from_env(cfg, monkeypatch):
     """生产服务器业务库名 (MYSQL_DATABASE / DB_NAME) 必须覆盖 semantic.yaml 里的本地默认值 chatbi，
     否则 compiler 会输出 `FROM chatbi.xxx` 跑到不存在的库——这是上线必踩坑。"""

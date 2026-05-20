@@ -3,16 +3,37 @@
 Score = 0.55 * cosine(embedding) + 0.45 * BM25(text)
 Then a small reranker (LLM-free, rule-boosted) bumps exact alias / domain matches.
 
-Indexes are built once per semantic layer reload and cached in Redis (per text).
+The embedding matrix is persisted under `backend/retrieval_index/` and committed
+to the repo:
+
+  - embed_matrix.npy : float32 [N, D] L2-normalized vectors
+  - docs.json        : list of {kind,name,label,text,payload} (parallel to matrix)
+  - meta.json        : { semantic_hash, model, dim, doc_count, built_at }
+
+Build resolution at startup:
+  1. If `retrieval_index/` exists AND meta.semantic_hash matches the live
+     `semantic.yaml` AND meta.model matches the configured embed model →
+     load from disk (no LLM API call). This is what production CentOS7 uses.
+  2. Otherwise → call the embedding API (requires DASHSCOPE_API_KEY) and
+     overwrite `retrieval_index/` on success.
+
+Operators rebuild the index by running `python -m scripts.build_retrieval_index`
+locally (where DASHSCOPE_API_KEY is set) after editing semantic.yaml, then
+commit `backend/retrieval_index/` and push.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
+import os
 import re
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -23,6 +44,12 @@ from app.core.llm.router import LLMRouter, get_llm_router
 from app.core.semantic import SemanticLayer
 
 logger = logging.getLogger("datachat.retrieval")
+
+# 索引产物目录：随仓库一起入 git，服务器拉新代码即可直接加载，无需联网 embedding。
+INDEX_DIR = Path(__file__).resolve().parents[3] / "retrieval_index"
+INDEX_MATRIX = INDEX_DIR / "embed_matrix.npy"
+INDEX_DOCS = INDEX_DIR / "docs.json"
+INDEX_META = INDEX_DIR / "meta.json"
 
 CHINESE_RE = re.compile(r"[一-鿿]+")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_一-鿿]+")
@@ -78,7 +105,94 @@ class HybridRetriever:
 
     # ------------------------------------------------------------ index
 
-    def build(self) -> None:
+    def _semantic_fingerprint(self) -> str:
+        """语义层指纹：决定一份持久化索引是否还匹配当前 semantic.yaml + embed 模型。
+        any change in metrics / dimensions / tables / few_shots 拼出的文本，
+        或切换 embed 模型，都会让指纹失效，强制重建。"""
+        h = hashlib.sha256()
+        # 文档文本集合
+        for m in self.semantic.list_metrics():
+            h.update(f"M|{m.name}|{m.label}|{'/'.join(m.aliases)}|{m.description}|{m.domain}|{m.unit}|{'/'.join(m.typical_questions)}|{'/'.join(m.typical_dimensions or [])}\n".encode("utf-8"))
+        for d in self.semantic.list_dimensions():
+            h.update(f"D|{d.name}|{d.label}|{'/'.join(d.aliases)}|{d.description}|{'/'.join(d.sample_values[:8] or [])}|{'/'.join(list(d.value_dict.values())[:8])}\n".encode("utf-8"))
+        for t in self.semantic.list_tables():
+            h.update(f"T|{t.name}|{t.label}|{t.grain}|{t.description}|{'/'.join(t.notes or [])}\n".encode("utf-8"))
+        for fs in self.semantic.few_shots:
+            h.update(f"F|{fs.question}\n".encode("utf-8"))
+        # 模型名（换模型 → 维度可能变 → 必须重建）
+        h.update(f"MODEL|{self.llm.llm.bailian_embed_model}\n".encode("utf-8"))
+        return h.hexdigest()[:16]
+
+    def _try_load_persisted(self) -> bool:
+        """尝试从 backend/retrieval_index/ 加载已持久化的索引。匹配则返回 True。"""
+        if not (INDEX_MATRIX.exists() and INDEX_DOCS.exists() and INDEX_META.exists()):
+            return False
+        try:
+            meta = json.loads(INDEX_META.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("retrieval index meta read failed: %s — will rebuild", exc)
+            return False
+        expected_fp = self._semantic_fingerprint()
+        if meta.get("semantic_hash") != expected_fp:
+            logger.info(
+                "retrieval index stale: meta.hash=%s expected=%s (semantic.yaml or embed model changed) — will rebuild",
+                meta.get("semantic_hash"), expected_fp,
+            )
+            return False
+        try:
+            matrix = np.load(INDEX_MATRIX)
+            docs = json.loads(INDEX_DOCS.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("retrieval index payload read failed: %s — will rebuild", exc)
+            return False
+        if matrix.shape[0] != len(docs):
+            logger.warning("retrieval index shape mismatch: matrix=%s docs=%s — will rebuild",
+                           matrix.shape, len(docs))
+            return False
+        self._embed_matrix = matrix
+        self._docs = docs
+        # BM25 stats 是 doc text 的纯函数，便宜，加载后即时再算
+        self._doc_tokens = []
+        self._df_counter = Counter()
+        for doc in self._docs:
+            tokens = _tokenize(doc["text"])
+            self._doc_tokens.append(tokens)
+            for unique in set(tokens):
+                self._df_counter[unique] += 1
+        self._avgdl = (sum(len(t) for t in self._doc_tokens) / max(1, len(self._doc_tokens))
+                       if self._doc_tokens else 1.0)
+        logger.info(
+            "retrieval index loaded from %s: %d docs, dim=%d, model=%s, built_at=%s",
+            INDEX_DIR, len(self._docs), matrix.shape[1] if matrix.ndim == 2 else 0,
+            meta.get("model"), meta.get("built_at"),
+        )
+        return True
+
+    def _persist(self) -> None:
+        """把当前内存里的索引写到 backend/retrieval_index/ ，下次启动可直接加载。"""
+        if self._embed_matrix is None or not self._docs:
+            return
+        try:
+            INDEX_DIR.mkdir(parents=True, exist_ok=True)
+            np.save(INDEX_MATRIX, self._embed_matrix.astype(np.float32))
+            INDEX_DOCS.write_text(json.dumps(self._docs, ensure_ascii=False), encoding="utf-8")
+            INDEX_META.write_text(json.dumps({
+                "semantic_hash": self._semantic_fingerprint(),
+                "model": self.llm.llm.bailian_embed_model,
+                "dim": int(self._embed_matrix.shape[1]) if self._embed_matrix.ndim == 2 else 0,
+                "doc_count": len(self._docs),
+                "built_at": datetime.now(timezone.utc).isoformat(),
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info("retrieval index persisted to %s (%d docs)", INDEX_DIR, len(self._docs))
+        except Exception as exc:
+            logger.warning("retrieval index persist failed: %s", exc)
+
+    def build(self, *, force_rebuild: bool = False) -> None:
+        # 优先从持久化文件加载——线上 CentOS7 走这条路，无需联网调 embedding API
+        if not force_rebuild and self._try_load_persisted():
+            self._built = True
+            return
+
         self._docs = []
         self._doc_tokens = []
         self._df_counter = Counter()
@@ -141,17 +255,24 @@ class HybridRetriever:
         else:
             self._avgdl = 1.0
 
-        # embeddings — try LLM, fall back to TF hashing if API fails
+        # embeddings — try LLM, fall back to BM25-only if API fails
         try:
             texts = [doc["text"] for doc in self._docs]
             vectors = self._embed_with_cache(texts)
             self._embed_matrix = np.vstack(vectors) if vectors else None
         except Exception as exc:
-            logger.warning("embedding init failed (%s) — fallback to BM25 only", exc)
+            logger.warning(
+                "embedding init failed (%s) — fallback to BM25 only. "
+                "若是生产服务器，请在本地预构建 retrieval_index/ 后 commit + redeploy。",
+                exc,
+            )
             self._embed_matrix = None
 
         self._built = True
         logger.info("retriever built: %s docs (embed_dim=%s)", len(self._docs), self.llm.embedding_dim)
+        # 构建成功（含向量）才落盘——失败的索引（None matrix）不持久化
+        if self._embed_matrix is not None:
+            self._persist()
 
     # -------------------------------------------------------------- search
 
