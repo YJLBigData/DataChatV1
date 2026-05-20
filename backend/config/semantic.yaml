@@ -1,4 +1,4 @@
-# DataChat 业务语义层（基于飞鹤 chatbi 真实 5 张表手工建模）
+# DataChat 业务语义层（基于飞鹤生产库 hs_poc 真实 6 张智能问数表手工建模）
 # ============================================================
 # 设计原则：
 # 1) 指标 metric 是用户口语的"业务量"，绑定唯一表达式与所属表
@@ -7,8 +7,15 @@
 # 4) Join 关系仅在确实需要跨表分析时定义，且只允许等值连接
 # 5) 任何字段必须满足"哪一张表的哪一列、什么含义、是否权限敏感"
 #
-# 时间范围口径：2025-01 ~ 2026-04（按真实数据范围）
-# 数据库：MySQL 本地 chatbi 库
+# 数据范围口径（按 ads_bi_month_shop_item_dan_summary_df 在生产 hs_poc 的真实数据）：
+#   月度汇总/明细：    2025-01 ~ 2026-05
+#   月度目标：         2026-01 ~ 2026-05
+#   首购新客（历史）：  2017-04 ~ 2026-05
+#   精准营养潜客：     2022-02 ~ 2026-05
+#   火山POC 销售明细： 2025-01 ~ 2026-05
+#
+# 数据库 schema 由环境变量 MYSQL_DATABASE / DB_NAME 在运行时注入
+# （本地 dev = chatbi，生产 = hs_poc）；下面 schema 字段只作为本地兜底。
 # ============================================================
 
 version: 2
@@ -16,7 +23,7 @@ profile: chatbi
 default_time_grain: month
 data_range:
   earliest: "2025-01"
-  latest: "2026-04"
+  latest: "2026-05"
 
 # ----------------------------------------------------------------
 # 数据表 tables
@@ -57,11 +64,12 @@ tables:
   ads_bi_month_shop_item_dan_summary_df:
     label: 月度门店段位汇总
     schema: chatbi
-    grain: 月-省区-城市-渠道-段位-圈层
+    grain: 月-大区-省区-城市-渠道-系列-段位-圈层
     description: |
-      管理层日常使用的核心销售汇总表。按月度聚合到省区/城市/渠道/段位/圈层，包含还原过单额与终端销售额。
+      管理层日常使用的核心销售汇总表（生产 1.3M 行，2025-01 ~ 2026-05）。按月度聚合到
+      大区/省区/城市/大系统渠道/产品系列/段位/圈层，包含还原过单额与终端销售额。
       99% 的高管问题（"东一区销售怎么样"、"卓睿系列卖得好不好"）应该首选这张表。
-      不到门店级别，不下钻到导购或单笔。
+      不到门店级别——要看具体门店/导购请用 ads_bi_month_shop_item_dan_detail_df。
     time_field_year: year
     time_field_month: month
     time_format: "YYYY + MM 两列拼成 YYYY-MM"
@@ -81,6 +89,34 @@ tables:
       - reduction_gd_sale_amount = 还原过单金额（不含货补），衡量经销商订货
       - year 和 month 都是字符串字段，month 是两位 "01"-"12"
       - 与 target 表通过 (year, month, lev2_name, lev3_name, big_system_channel_name) 关联做达成率
+
+  ads_bi_month_shop_item_dan_detail_df:
+    label: 月度门店段位明细
+    schema: chatbi
+    grain: 月-大区-省区-省份-城市-门店-渠道-系列-段位-圈层
+    description: |
+      summary 表的门店级明细版（生产 12.7M 行，2025-01 ~ 2026-05），在 summary 维度
+      之上多了 shop_code/shop_name/province。当用户问"具体哪家门店"、"门店排名"、
+      "某省下钻"、"门店级业绩"时选这张表；如果只问大区/省区/城市层面，仍优先 summary。
+    time_field_year: year
+    time_field_month: month
+    time_format: "YYYY + MM 两列拼成 YYYY-MM"
+    primary_dimensions:
+      - region
+      - sub_region
+      - province
+      - city
+      - shop
+      - big_system_channel
+      - item_series
+      - item_dan
+      - terminal_circle
+    measures:
+      - terminal_sale_amount_total
+      - reduction_gd_sale_amount_total
+    notes:
+      - 字段口径与 summary 完全一致，只是粒度更细（含 shop_code/shop_name/province）
+      - 行数比 summary 大 10 倍——只在确实需要门店级时才用，避免无谓全表扫描
 
   ads_bi_month_shop_item_dan_target_summary_df:
     label: 月度门店段位目标汇总
@@ -156,11 +192,12 @@ dimensions:
     table_columns:
       ads_bi_hs_sale_info_df: lev2_name
       ads_bi_month_shop_item_dan_summary_df: lev2_name
+      ads_bi_month_shop_item_dan_detail_df: lev2_name
       ads_bi_month_shop_item_dan_target_summary_df: lev2_name
       ads_member_first_purchase_new_customer_total_df: lev2_name
       ads_precision_nutrition_potential_total_df: lev2_name
-    sample_values: [东一区, 东二区, 中一区, 中二区, 北一区, 南一区, 直辖区, 西一区]
-    description: 飞鹤销售区域第一层（共 8 个大区）
+    sample_values: [东一区, 中一区, 中二区, 北一区, 南一区, 南二区, 西一区, 西二区, 直辖区]
+    description: 飞鹤销售区域第一层（生产实际 9 个大区：东一/中一/中二/北一/南一/南二/西一/西二/直辖）
 
   sub_region:
     label: 省区
@@ -168,11 +205,80 @@ dimensions:
     table_columns:
       ads_bi_hs_sale_info_df: lev3_name
       ads_bi_month_shop_item_dan_summary_df: lev3_name
+      ads_bi_month_shop_item_dan_detail_df: lev3_name
       ads_bi_month_shop_item_dan_target_summary_df: lev3_name
       ads_member_first_purchase_new_customer_total_df: lev3_name
       ads_precision_nutrition_potential_total_df: lev3_name
-    sample_values: [北京, 吉林, 天津, 川南, 粤东, 苏中, 苏北, 豫东, 豫北, 赣北, 辽西, 鄂东, 闽南, 陕西, 鲁北, 黑龙江]
-    description: 飞鹤销售区域第二层，下钻自大区
+    sample_values:
+      - 甘肃
+      - 新疆
+      - 豫北
+      - 云南
+      - 川南
+      - 晋北
+      - 贵州
+      - 皖南
+      - 皖北
+      - 湘北
+      - 福建
+      - 赣北
+      - 吉林
+      - 桂北
+      - 桂南
+      - 川北
+      - 赣南
+      - 鄂东
+      - 湘南
+      - 鄂西
+      - 苏北
+      - 陕二
+      - 粤北
+      - 浙南
+      - 粤东
+      - 晋南
+      - 苏南
+      - 浙北
+      - 陕一
+      - 辽东
+      - 鲁西
+      - 黑东
+      - 鲁中
+      - 辽西
+      - 鲁东
+      - 豫东
+      - 黑西
+      - 冀北
+      - 粤西
+      - 冀南
+      - 粤中
+      - 重庆
+      - 鲁北
+      - 豫中
+      - 豫南
+      - 川中
+      - 海南
+      - 冀中
+      - 天津
+      - 上海
+    description: 飞鹤销售区域第二层（生产 50+ 个省区，按销售记录量降序的真实命名；非"行政省"概念，是飞鹤内部行政划分）
+
+  province:
+    label: 省份
+    aliases: [省, 省份, 行政省, 行政区划]
+    table_columns:
+      ads_bi_month_shop_item_dan_detail_df: province
+    sample_values:
+      - 河南省
+      - 广东省
+      - 山东省
+      - 四川省
+      - 湖南省
+      - 安徽省
+      - 广西壮族自治区
+      - 河北省
+      - 江苏省
+      - 浙江省
+    description: 标准行政省份名（detail 表独有；与 sub_region 不同，sub_region 是飞鹤内部省区划分）
 
   city:
     label: 城市
@@ -180,8 +286,34 @@ dimensions:
     table_columns:
       ads_bi_hs_sale_info_df: official_city
       ads_bi_month_shop_item_dan_summary_df: city
-    sample_values: [北京市, 上海市, 哈尔滨市, 长春市, 苏州市, 南通市, 西安市, 厦门市, 泉州市]
-    description: 行政市/城市级别
+      ads_bi_month_shop_item_dan_detail_df: city
+    sample_values:
+      - 市辖区
+      - 省直辖县级行政区划
+      - 宜春市
+      - 开封市
+      - 临沂市
+      - 温州市
+      - 九江市
+      - 成都市
+      - 徐州市
+      - 聊城市
+      - 滁州市
+      - 赣州市
+      - 商丘市
+      - 长沙市
+      - 抚州市
+      - 南宁市
+      - 晋中市
+      - 广州市
+      - 菏泽市
+      - 重庆郊县
+      - 西安市
+      - 长春市
+      - 湛江市
+      - 邵阳市
+      - 六安市
+    description: 行政市/城市级别（生产实际 335 个城市，含特殊取值"市辖区"/"省直辖县级行政区划"代表少数民族州县/直辖区辖区）
 
   channel_type:
     label: 渠道类型
@@ -193,36 +325,44 @@ dimensions:
       "2": KA超市
       "3": 电商
       "4": 母婴大客户
+      "13": 其他渠道-13
       "14": 其他
-    description: 销售业务渠道类型代码
+      "16": 其他渠道-16
+      "21": 其他渠道-21
+    description: |
+      销售业务渠道类型代码（生产实际出现 7 种：1/2/3/13/14/16/21）。
+      字典映射中 13/16/21 业务侧未提供权威译名；如需准确分组，建议直接用 code 过滤。
 
   big_system_channel:
     label: 大系统渠道
-    aliases: [大系统, 渠道系统, 渠道客户]
+    aliases: [大系统, 渠道系统, 渠道客户, 大系统渠道名称]
     table_columns:
       ads_bi_month_shop_item_dan_summary_df: big_system_channel_name
+      ads_bi_month_shop_item_dan_detail_df: big_system_channel_name
       ads_bi_month_shop_item_dan_target_summary_df: big_system_channel_name
       ads_member_first_purchase_new_customer_total_df: big_system_channel_name
       ads_precision_nutrition_potential_total_df: big_system_channel_name
-    sample_values: [CS00019, CS01967, CS01972, CS01990, CS02047, LS03342, LS06354, LS07589, LS08553]
-    description: 大系统渠道客户编码（CS/LS 等前缀）
+    sample_values: [省区常规, RKSC渠道, NKA渠道, KSC西区, KSC东区]
+    description: 大系统渠道（生产实际 5 个：省区常规 / RKSC渠道 / NKA渠道 / KSC西区 / KSC东区）
 
   shop_type:
     label: 门店类型
     aliases: [门店类别]
     table_columns:
       ads_bi_hs_sale_info_df: shop_type
-    sample_values: [专职门店, 无导门店]
-    description: 飞鹤门店类型
+    sample_values: [专职门店, 无导门店, B类门店, 返利账号门店]
+    description: 飞鹤门店类型（生产实际 4 种）
 
   shop:
     label: 门店
     aliases: [门店, 店铺, 终端门店]
     table_columns:
       ads_bi_hs_sale_info_df: shop_name
-    description: 单门店名称
+      ads_bi_month_shop_item_dan_detail_df: shop_name
+    description: 单门店名称（生产 detail 表里 10 万+ 不同 shop_code，103K+ 不同 shop_name；汇总表无此维度，要看具体门店必须用 detail 表）
     code_column:
       ads_bi_hs_sale_info_df: shop_code
+      ads_bi_month_shop_item_dan_detail_df: shop_code
 
   guide:
     label: 导购
@@ -253,31 +393,64 @@ dimensions:
 
   item_series:
     label: 产品系列
-    aliases: [产品系列, 系列, 品系]
+    aliases: [产品系列, 系列, 品系, 产品线]
     table_columns:
       ads_bi_hs_sale_info_df: item_series_new
       ads_bi_month_shop_item_dan_summary_df: item_series_new_name
+      ads_bi_month_shop_item_dan_detail_df: item_series_new_name
     sample_values:
-      - 卓睿
-      - 星飞帆卓耀铂金（有机A2 β-酪蛋白）
+      - 星飞帆-卓睿
       - 星飞帆经典1-3段
-      - 淳芮有机
+      - 星飞帆卓耀
+      - 臻稚卓蓓
+      - 飞帆
+      - 臻爱倍护-控店
+      - 星飞帆卓睿Pro
+      - 星飞帆900g
+      - 星飞帆卓初
+      - 臻爱飞帆A2
       - 臻爱倍护-全渠道
-      - 臻爱飞帆
+      - 星飞帆A2
+      - 星飞帆有机A2奶源版
+      - 星蕴
+      - 精粹益加A2
+      - 星飞帆小羊
+      - 星飞帆经典4段
+      - 臻爱星萃A2
+      - 星飞帆有机奶源版
+      - 茁然-茁护
+      - 臻爱跃护A2
+      - 小羊妙可
+      - 臻爱倍护有机奶源版
+      - 星飞帆卓舒
+      - 星飞帆卓睿4段
+      - 飞鹤迹萃
+      - 星飞帆卓耀铂金（有机A2 β-酪蛋白）
+      - 淳芮有机
+      - 星飞帆卓初A2中国红
+      - 星飞帆卓耀蓝钻（有机）
       - 茁然-奶粉4段
-      - 飞帆呵护
       - 飞鹤牧场-经典
-    description: 飞鹤产品系列
+      - 臻稚经典1-3段
+      - 经典爱本-牛
+      - 经典1962-金装
+    description: |
+      飞鹤产品系列（生产实际 80+ 种，按销售记录量降序取前 35 为最有代表性值）。
+      系列名常含中文括号和特殊字符（如 "（有机A2 β-酪蛋白）"），匹配时注意全角字符。
 
   item_dan:
     label: 段位
-    aliases: [段位, 产品段位, 配方段位]
+    aliases: [段位, 产品段位, 配方段位, 段次]
     table_columns:
       ads_bi_hs_sale_info_df: item_stage
       ads_bi_month_shop_item_dan_summary_df: item_dan_name
+      ads_bi_month_shop_item_dan_detail_df: item_dan_name
       ads_member_first_purchase_new_customer_total_df: item_dan_name
-    sample_values: [1段, 2段, 3段, 4段, 儿童, 成人]
-    description: 婴幼儿配方奶粉的段位划分
+    sample_values: [1段, 2段, 3段, 4段, 0段, 成人, 空段]
+    description: |
+      婴幼儿配方奶粉的段位划分。
+      summary/detail 表实际取值：0段/1段/2段/3段/4段/空段；
+      sale_info 表的 item_stage 字段额外有"成人"/"其他"（属于不同的产品系列体系）。
 
   item_spec:
     label: 产品规格
@@ -289,11 +462,19 @@ dimensions:
 
   terminal_circle:
     label: 圈层等级
-    aliases: [圈层, 终端圈层, 终端等级]
+    aliases: [圈层, 终端圈层, 终端等级, 圈子]
     table_columns:
       ads_bi_month_shop_item_dan_summary_df: terminal_circle_level
-    sample_values: [基础终端, 成长终端, 核心终端, "潜力终端-定制品"]
-    description: 终端门店圈层分级
+      ads_bi_month_shop_item_dan_detail_df: terminal_circle_level
+    sample_values:
+      - 潜力终端-流通品
+      - 潜力终端-定制品
+      - 闭环圈子
+      - 平台型-NKA
+      - 平台型-LKA/LC
+      - 加盟型大系统KSC西区
+      - 平台型-KSC东区
+    description: 终端门店圈层分级（生产实际 7 种，按销售记录量降序）
 
   business_representative:
     label: 业务代表
@@ -333,6 +514,7 @@ time_dimensions:
     composite: true
     table_columns:
       ads_bi_month_shop_item_dan_summary_df: [year, month]
+      ads_bi_month_shop_item_dan_detail_df: [year, month]
       ads_bi_month_shop_item_dan_target_summary_df: [year, month]
       ads_member_first_purchase_new_customer_total_df: [year, month]
       ads_precision_nutrition_potential_total_df: [year, month]
@@ -731,6 +913,72 @@ few_shots:
       group_by: [city]
       order_by: [{field: terminal_sale_amount_total, dir: desc}]
       limit: 5
+
+  - question: 各大区终端销售金额和还原过单金额差异多少？差异最大的前 10 个大区
+    intent:
+      metric: terminal_sale_amount_total
+      extra_metrics: [reduction_gd_sale_amount_total]
+      time_range:
+        kind: relative
+        period: this_month
+      group_by: [region]
+      calculation: rank
+      order_by: [{field: terminal_sale_amount_total, dir: desc}]
+      limit: 10
+    sql_hint: |
+      -- 两个指标都 SELECT，answerer 在 narrative 阶段算差值并按差值重排
+      SELECT lev2_name AS region,
+             SUM(terminal_sale_amount) AS terminal_sale_amount_total,
+             SUM(reduction_gd_sale_amount) AS reduction_gd_sale_amount_total
+      FROM ads_bi_month_shop_item_dan_summary_df
+      WHERE year='2026' AND month='04'
+      GROUP BY lev2_name
+      ORDER BY terminal_sale_amount_total DESC
+      LIMIT 10
+    notes: |
+      "两个指标的差值/绝对值"类问题，不要 needs_clarify。
+      QueryPlan 的 order_by 不接受衍生表达式，但只要把两个指标都 SELECT 出来（metric +
+      extra_metrics），answerer 拿到的数据足以算差值并按差值描述前 N。
+
+  - question: 销售额前 10 的门店
+    intent:
+      metric: terminal_sale_amount_total
+      time_range:
+        kind: relative
+        period: this_month
+      group_by: [shop]
+      order_by: [{field: terminal_sale_amount_total, dir: desc}]
+      limit: 10
+    sql_hint: |
+      -- 门店级粒度必须用 detail 表，summary 表不到门店级
+      SELECT shop_code, shop_name, SUM(terminal_sale_amount) AS terminal_sale_amount_total
+      FROM ads_bi_month_shop_item_dan_detail_df
+      WHERE year='2026' AND month='04'
+      GROUP BY shop_code, shop_name
+      ORDER BY terminal_sale_amount_total DESC
+      LIMIT 10
+    notes: 涉及"门店"维度必须切到 ads_bi_month_shop_item_dan_detail_df，summary 表没有 shop_code/shop_name
+
+  - question: 河南省销售额按城市拆分
+    intent:
+      metric: terminal_sale_amount_total
+      time_range:
+        kind: relative
+        period: this_month
+      filters:
+        province: 河南省
+      group_by: [city]
+      order_by: [{field: terminal_sale_amount_total, dir: desc}]
+    sql_hint: |
+      -- province 维度只在 detail 表存在
+      SELECT city, SUM(terminal_sale_amount) AS terminal_sale_amount_total
+      FROM ads_bi_month_shop_item_dan_detail_df
+      WHERE year='2026' AND month='04' AND province='河南省'
+      GROUP BY city
+      ORDER BY terminal_sale_amount_total DESC
+    notes: |
+      province（行政省）与 sub_region（飞鹤内部省区）是两个不同的维度。province 只在 detail 表。
+      用户问"河南省/广东省/山东省"等行政省时用 detail.province；问"豫北/粤东/苏中"等飞鹤省区时用 sub_region(lev3_name)。
 
 # ----------------------------------------------------------------
 # 同义词字典（用户口语 → 标准术语）

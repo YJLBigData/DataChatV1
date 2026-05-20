@@ -1,0 +1,7 @@
+{
+  "semantic_hash": "3b4067a129f60767",
+  "model": "text-embedding-v3",
+  "dim": 1024,
+  "doc_count": 56,
+  "built_at": "2026-05-20T08:47:34.046032+00:00"
+}
