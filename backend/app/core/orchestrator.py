@@ -24,6 +24,7 @@ from typing import Any, AsyncGenerator, Callable, Iterable
 
 from app.core.answerer import Answerer
 from app.core.cache import get_cache
+from app.core.cache.redis_cache import _fingerprint
 from app.core.config import V1Config, load_config
 from app.core.exec import ExecError, get_executor
 from app.core.guard import GuardError, SQLGuard
@@ -126,7 +127,7 @@ class Pipeline:
             emit("input", "error", {"reason": "empty"}, 0)
             return PipelineResult(trace_id=trace_id, question="", answer={"narrative": "请输入问题。"}, plan={}, sql="", rows=0, elapsed_ms=0, cached=False, events=[e.to_dict() for e in events])
 
-        # Stage 1: L1 cache
+        # Stage 1: L1 cache  —  (question, user_id, ctx_fp) 精确匹配
         ctx_fp = ""
         if previous_plan and previous_plan.metric:
             ctx_fp = previous_plan.signature()
@@ -149,6 +150,42 @@ class Pipeline:
                 events=[e.to_dict() for e in events],
             )
         emit("cache", "miss", {"layer": "L1"}, 0)
+
+        # Stage 1b: question→plan_sig 索引（跨会话/跨上下文加速）
+        #
+        # L1 必须把 ctx_fp 算进 key（多轮上下文里同一句话意图不同），导致"换个会话又问一遍同一题"
+        # 永远 miss。这里加一道弱关联索引：用 (question, user_id) 反查上次问出来的 plan_sig，
+        # 拿到 plan_sig 后到 L2 plan-keyed cache 取完整 answer。命中即跳过 planner LLM (~58s)
+        # + answerer LLM (~120s)，整条请求 < 200ms 返回。
+        # 上下文真变了？没事——这里只是预判，下面 planner 跑完后会再校验一次 plan_sig，
+        # 校验不过就放弃这条加速、走完整流程。
+        q2p_key = self.cache._k("q2p", _fingerprint(question_clean, user_id)) if hasattr(self.cache, "_k") else None
+        prefetched_plan_sig = None
+        if q2p_key and not force_refresh:
+            try:
+                prefetched_plan_sig = self.cache.get(q2p_key)
+            except Exception:
+                prefetched_plan_sig = None
+            if prefetched_plan_sig:
+                plan_cached = None
+                try:
+                    plan_cached = self.cache.get_plan(prefetched_plan_sig)
+                except Exception:
+                    plan_cached = None
+                if plan_cached:
+                    emit("cache", "hit", {"layer": "L2 (q2p)", "plan_sig": prefetched_plan_sig[:12]}, 0)
+                    elapsed = int((time.perf_counter() - run_started) * 1000)
+                    return PipelineResult(
+                        trace_id=trace_id,
+                        question=question_clean,
+                        answer=plan_cached.get("answer") or {},
+                        plan=plan_cached.get("plan") or {},
+                        sql=plan_cached.get("sql") or "",
+                        rows=int(plan_cached.get("rows") or 0),
+                        elapsed_ms=elapsed,
+                        cached=True,
+                        events=[e.to_dict() for e in events],
+                    )
 
         # Stage 1.5: 复杂多表分析 / 用户要求"直接返回 SQL" → 走 direct-SQL 路径
         try:
@@ -200,6 +237,38 @@ class Pipeline:
         }, plan_only_ms)
 
         plan = plan_result.plan
+
+        # Stage 3.2: L2 plan-keyed cache 二次检查
+        # 即使 q2p 没命中（首次新问题 / 索引失效 / 上下文真的变了），只要 planner 这次产出的
+        # plan 在以前的请求里出现过（任何用户 / 任何会话）→ 直接复用历史完整答案。
+        # 一次 planner LLM 的代价已经付了，但能跳过 compile/execute/answerer LLM（120s+）。
+        plan_sig_now = plan.signature() if plan.metric else ""
+        if plan_sig_now and not force_refresh:
+            plan_cached = None
+            try:
+                plan_cached = self.cache.get_plan(plan_sig_now)
+            except Exception:
+                plan_cached = None
+            if plan_cached:
+                emit("cache", "hit", {"layer": "L2 (plan)", "plan_sig": plan_sig_now[:12]}, 0)
+                # 写回 q2p 索引（即使首次 miss，这次帮下次秒返）
+                if q2p_key:
+                    try:
+                        self.cache.set(q2p_key, plan_sig_now, ttl=self.cache.cfg.ttl_question if hasattr(self.cache, "cfg") else 3600)
+                    except Exception:
+                        pass
+                elapsed = int((time.perf_counter() - run_started) * 1000)
+                return PipelineResult(
+                    trace_id=trace_id,
+                    question=question_clean,
+                    answer=plan_cached.get("answer") or {},
+                    plan=plan_cached.get("plan") or plan.to_dict(),
+                    sql=plan_cached.get("sql") or "",
+                    rows=int(plan_cached.get("rows") or 0),
+                    elapsed_ms=elapsed,
+                    cached=True,
+                    events=[e.to_dict() for e in events],
+                )
 
         # Stage 3.5: clarify shortcut
         if plan.needs_clarify:
@@ -360,11 +429,21 @@ class Pipeline:
         }, answer_ms)
 
         elapsed = int((time.perf_counter() - run_started) * 1000)
-        # cache L1 question (only happy path)
+        # cache L1 question (精确匹配，含 ctx_fp)
+        cache_payload = {
+            "answer": answer_payload, "plan": plan.to_dict(),
+            "sql": guarded_sql, "rows": exec_obj.row_count if exec_obj else 0,
+        }
         try:
-            self.cache.set_question(question_clean, user_id, ctx_fp, {
-                "answer": answer_payload, "plan": plan.to_dict(), "sql": guarded_sql, "rows": exec_obj.row_count if exec_obj else 0,
-            })
+            self.cache.set_question(question_clean, user_id, ctx_fp, cache_payload)
+        except Exception:
+            pass
+        # cache L2 plan-keyed answer + q2p 索引（让下次跨会话/跨上下文也能命中）
+        try:
+            if plan_sig_now:
+                self.cache.set_plan(plan_sig_now, cache_payload)
+                if q2p_key:
+                    self.cache.set(q2p_key, plan_sig_now, ttl=self.cache.cfg.ttl_question if hasattr(self.cache, "cfg") else 3600)
         except Exception:
             pass
 

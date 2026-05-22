@@ -42,6 +42,62 @@ def test_semantic_layer_loads_metrics_and_dims(semantic: SemanticLayer):
     assert len(semantic.calculations) >= 7
 
 
+# --------------------------------------------------------- QueryPlan.signature
+def test_plan_signature_stable_across_llm_jitter():
+    """LLM 每次会给不同的 confidence / reasoning，但只要 SQL 形状（指标/维度/过滤/时间/计算/排序）
+    一致，signature 必须相同——否则 L2 plan-keyed cache 永远不会命中。"""
+    base = QueryPlan(
+        metric="terminal_sale_amount_total",
+        extra_metrics=["reduction_gd_sale_amount_total"],
+        table="ads_bi_month_shop_item_dan_summary_df",
+        group_by=["region"],
+        filters=[PlanFilter(dimension="region", values=["东一区"], op="in")],
+        time_range=TimeRange(kind=TimeKind.ABSOLUTE, year="2025", months=["01"]),
+        calculation="rank",
+        order_by=[OrderBy(field="terminal_sale_amount_total", dir="desc")],
+        limit=10,
+        confidence=0.6,
+        reasoning="第一次的解释",
+        needs_clarify=False,
+    )
+    # 同 SQL 形状、不同 LLM 抖动字段 → signature 必须一致
+    jittered = QueryPlan(
+        metric=base.metric,
+        extra_metrics=list(base.extra_metrics),
+        table=base.table,
+        group_by=list(base.group_by),
+        filters=[PlanFilter(dimension="region", values=["东一区"], op="in")],
+        time_range=TimeRange(kind=TimeKind.ABSOLUTE, year="2025", months=["01"]),
+        calculation=base.calculation,
+        order_by=[OrderBy(field="terminal_sale_amount_total", dir="desc")],
+        limit=base.limit,
+        confidence=0.93,             # 不同
+        reasoning="第二次完全不同的解释",  # 不同
+        needs_clarify=True,            # 不同（也不应影响）
+        clarify_reason="不应入 hash",   # 不同
+    )
+    assert base.signature() == jittered.signature(), "signature 不应被 LLM 抖动字段影响"
+
+    # 真正影响 SQL 的字段（limit）变了 → signature 必须不同
+    different = QueryPlan(
+        metric=base.metric, table=base.table, group_by=list(base.group_by),
+        time_range=base.time_range, calculation=base.calculation,
+        order_by=list(base.order_by), limit=20,  # ← 改了
+    )
+    assert base.signature() != different.signature()
+
+    # filters 顺序变 → signature 不变（已 sort）
+    p_a = QueryPlan(
+        metric="x", table="t",
+        filters=[PlanFilter(dimension="a", values=["1"]), PlanFilter(dimension="b", values=["2"])],
+    )
+    p_b = QueryPlan(
+        metric="x", table="t",
+        filters=[PlanFilter(dimension="b", values=["2"]), PlanFilter(dimension="a", values=["1"])],
+    )
+    assert p_a.signature() == p_b.signature(), "filters 顺序不应影响 signature"
+
+
 # --------------------------------------------------------- LLM router json parse
 def test_safe_json_parse_handles_feihe_agent_styles():
     """飞鹤 kaier_znws Agent 高频输出格式，必须无需 repair pass 就解析成功。"""

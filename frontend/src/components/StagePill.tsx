@@ -58,11 +58,20 @@ export function StagePill({ events, pending }: Props) {
               : "qq-stage-active";
         const isLLM = LLM_STAGES.has(s);
         const sec = fmtSec(e.elapsed_ms);
+        // cache 命中要把哪一层标出来 —— L1 精确 / L2(q2p) 同问题秒返 / L2(plan) 同 plan 复用
+        let cacheTag = "";
+        if (s === "cache" && e.status === "hit") {
+          const layer = (e.payload && (e.payload as any).layer) || "";
+          cacheTag = layer ? ` · ${layer} 命中` : " · 命中";
+        } else if (s === "cache" && e.status === "miss") {
+          cacheTag = " · 未命中";
+        }
         return (
           <span key={s} className={`qq-stage-pill ${cls}`} title={isLLM ? "等待大模型反馈" : undefined}>
             <span className="qq-dot" style={{ background: "currentColor", opacity: 0.5 }} />
             {STAGE_LABEL[s] || s}
             {isLLM && <span className="ml-1 text-[10px] opacity-75">🤖</span>}
+            {cacheTag}
             {sec ? ` · ${sec}` : null}
           </span>
         );

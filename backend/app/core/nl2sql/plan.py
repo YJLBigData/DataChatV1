@@ -193,9 +193,35 @@ class QueryPlan:
         )
 
     def signature(self) -> str:
+        """SQL-shape stable hash. 只把"决定 SQL 形状 + 决定结果集"的字段纳入：
+        metric / extra_metrics / table / group_by / filters / time_range /
+        calculation / order_by / limit。
+
+        故意剔除 LLM 每次都会抖动的字段：
+          - confidence  ← LLM 给的置信度（每次不同）
+          - reasoning   ← LLM 写的解释（每次不同）
+          - needs_clarify / clarify_reason / clarify_options ← 澄清相关，不影响 SQL
+
+        这样"同一道题在不同会话里第二次问"能命中 L2 plan-keyed cache。
+        """
         import hashlib
         import json
-        raw = json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)
+        canonical = {
+            "metric": self.metric,
+            "extra_metrics": sorted(self.extra_metrics or []),
+            "table": self.table,
+            "group_by": list(self.group_by or []),
+            "filters": sorted(
+                ((f.dimension, sorted([str(v) for v in (f.values or [])]), f.op or "in")
+                 for f in (self.filters or [])),
+                key=lambda x: x[0],
+            ),
+            "time_range": self.time_range.to_dict() if self.time_range else None,
+            "calculation": self.calculation or "",
+            "order_by": [(o.field, o.dir or "desc") for o in (self.order_by or [])],
+            "limit": int(self.limit or 0),
+        }
+        raw = json.dumps(canonical, ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
