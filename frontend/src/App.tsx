@@ -29,6 +29,7 @@ import { LoginScreen } from "./components/LoginScreen";
 import { PasswordModal } from "./components/PasswordModal";
 import { Sidebar } from "./components/Sidebar";
 import { UserMenu } from "./components/UserMenu";
+import { LLMSettingsPage } from "./components/pages/LLMSettingsPage";
 import { LogsPage } from "./components/pages/LogsPage";
 import { PermissionsPage } from "./components/pages/PermissionsPage";
 import { ReportTemplatesPage } from "./components/pages/ReportTemplatesPage";
@@ -614,7 +615,10 @@ export default function App() {
           {page === "permissions" && user.role === "admin" && (
             <section className="flex-1 overflow-y-auto"><PermissionsPage /></section>
           )}
-          {(page === "logs" || page === "users" || page === "permissions" || page === "semantic") && user.role !== "admin" && (
+          {page === "llm_settings" && user.role === "admin" && (
+            <section className="flex-1 overflow-y-auto"><LLMSettingsPage /></section>
+          )}
+          {(page === "logs" || page === "users" || page === "permissions" || page === "semantic" || page === "llm_settings") && user.role !== "admin" && (
             <section className="flex flex-1 items-center justify-center text-sm text-slate-400">
               该页面仅管理员可访问
             </section>

@@ -174,6 +174,15 @@ class ReportTemplatePatchReq(BaseModel):
     is_default: Optional[bool] = None
 
 
+class LLMSettingsPutReq(BaseModel):
+    """管理页提交的 LLM 设置（全部可选；None=不动；""=清除该键回退到 env/默认）。"""
+    DASHSCOPE_API_KEY: Optional[str] = Field(default=None, description="百炼 AK，sk-...")
+    DASHSCOPE_BASE_URL: Optional[str] = Field(default=None, description="百炼 base URL")
+    DASHSCOPE_MODEL: Optional[str] = Field(default=None, description="百炼 chat 模型名 (qwen-plus / qwen-max / qwen3.6-max-preview 等)")
+    DASHSCOPE_EMBED_MODEL: Optional[str] = Field(default=None, description="百炼 embedding 模型 (text-embedding-v3 等)")
+    LLM_PROVIDER: Optional[str] = Field(default=None, description="默认 provider: bailian / feihe")
+
+
 class FolderCreateReq(BaseModel):
     name: str
     color: str = ""
@@ -732,6 +741,33 @@ def create_app() -> FastAPI:
             "available": available_providers(),
             "default": default_provider(),
         }
+
+    # ============================================================ admin: llm settings
+    @app.get("/api/admin/llm-settings")
+    def api_admin_get_llm_settings(_: User = Depends(require_admin)) -> dict[str, Any]:
+        """读当前生效的 LLM 配置（DB 优先 → env → cfg 默认）。
+        secret(DASHSCOPE_API_KEY) 一律脱敏成 'sk-***1234'，**绝不**回完整密文。"""
+        from app.core.llm_settings import get_llm_settings_store
+        return {"settings": get_llm_settings_store().get_all_effective()}
+
+    @app.put("/api/admin/llm-settings")
+    def api_admin_put_llm_settings(
+        req: LLMSettingsPutReq = Body(...),
+        _: User = Depends(require_admin),
+    ) -> dict[str, Any]:
+        """写 LLM 配置到 SQLite，**写完即生效**（下一次 LLM 调用自动用新值，无需重启）。
+        空字符串/None 视为"清除该键"，下次回退到 env 或代码默认。
+        允许键白名单：DASHSCOPE_API_KEY / DASHSCOPE_BASE_URL / DASHSCOPE_MODEL /
+                   DASHSCOPE_EMBED_MODEL / LLM_PROVIDER。"""
+        from app.core.llm_settings import get_llm_settings_store
+        store = get_llm_settings_store()
+        # req.dict(exclude_unset=False) 取所有字段；空串=清除，None=不动
+        payload = req.dict()
+        # None 字段视作"未传/不动"，过滤掉
+        updates = {k: v for k, v in payload.items() if v is not None}
+        changed = store.set_many(updates)
+        logger.info("admin llm-settings update keys=%s", changed)
+        return {"ok": True, "updated": changed, "version": store.version}
 
     # ============================================================ chat
 

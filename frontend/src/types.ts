@@ -235,4 +235,14 @@ export interface SemanticProposal {
   metrics: Record<string, any>;
 }
 
-export type PageId = "chat" | "users" | "logs" | "semantic" | "permissions" | "report_templates";
+export type PageId = "chat" | "users" | "logs" | "semantic" | "permissions" | "report_templates" | "llm_settings";
+
+export interface LLMSettingItem {
+  value: string;
+  is_secret: boolean;
+  is_set: boolean;
+  source: "db" | "env" | "default";
+}
+export interface LLMSettingsResp {
+  settings: Record<string, LLMSettingItem>;
+}

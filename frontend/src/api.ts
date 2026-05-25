@@ -265,6 +265,23 @@ export const api = {
       default: string;
     }>("/api/llm/providers"),
 
+  /* ---------- admin: LLM 设置（热改 + 持久化）---------- */
+  adminGetLLMSettings: () =>
+    jsonReq<import("./types").LLMSettingsResp>("/api/admin/llm-settings"),
+
+  // 入参字段：null = 不动，"" = 清除回退到 env/默认，非空 = 写入 DB
+  adminPutLLMSettings: (req: {
+    DASHSCOPE_API_KEY?: string | null;
+    DASHSCOPE_BASE_URL?: string | null;
+    DASHSCOPE_MODEL?: string | null;
+    DASHSCOPE_EMBED_MODEL?: string | null;
+    LLM_PROVIDER?: string | null;
+  }) =>
+    jsonReq<{ ok: boolean; updated: string[]; version: number }>("/api/admin/llm-settings", {
+      method: "PUT",
+      body: JSON.stringify(req),
+    }),
+
   /* ---------- 飞书 ---------- */
   feishuPush: (req: {
     title: string;

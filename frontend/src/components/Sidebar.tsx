@@ -22,6 +22,7 @@ const ITEMS: Item[] = [
   { id: "logs",             label: "日志",     iconPath: "M4 5h16M4 11h16M4 17h10",                 adminOnly: true },
   { id: "permissions",      label: "数据权限", iconPath: "M12 2l8 4v6c0 5-3.4 9-8 10-4.6-1-8-5-8-10V6z", adminOnly: true },
   { id: "users",            label: "用户管理", iconPath: "M16 11a4 4 0 100-8 4 4 0 000 8zm-8 0a4 4 0 100-8 4 4 0 000 8zm0 2c-3 0-6 1.5-6 4v3h12v-3c0-2.5-3-4-6-4zm8 0c-.7 0-1.4.1-2 .3 1.8 1 3 2.4 3 3.7v3h7v-3c0-2.5-4.4-4-8-4z", adminOnly: true },
+  { id: "llm_settings",     label: "LLM 设置", iconPath: "M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5z M12 14v8 M8 22h8", adminOnly: true },
 ];
 
 /** 左侧主导航。普通用户只看 chat，管理员看全部。 */

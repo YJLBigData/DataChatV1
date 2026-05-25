@@ -225,6 +225,70 @@ def test_explain_gate_enabled_calls_explain(monkeypatch):
     assert FakeConn.called is True
 
 
+def test_llm_settings_store_set_get_mask(tmp_path, monkeypatch):
+    """LLMSettingsStore：白名单 / 脱敏 / DB 优先 / 空串清除 / version 自增。"""
+    # 清掉本机 .env 灌进来的 env 变量，确认 DB 与 default 行为
+    for k in ["DASHSCOPE_API_KEY", "DASHSCOPE_MODEL", "DASHSCOPE_BASE_URL", "DASHSCOPE_EMBED_MODEL", "LLM_PROVIDER"]:
+        monkeypatch.setenv(k, "")
+    from app.core.llm_settings import LLMSettingsStore, ALLOWED_KEYS, SECRET_KEYS, _mask
+    s = LLMSettingsStore(tmp_path / "llm.db")
+    v0 = s.version
+    # 1) 写两个键 + 一个未授权键（应被静默丢弃）
+    changed = s.set_many({
+        "DASHSCOPE_API_KEY": "FAKE_TEST_KEY_ZZZZ1234",
+        "DASHSCOPE_MODEL": "qwen-max",
+        "FOO_HACK": "x",   # 不在白名单
+    })
+    assert set(changed) == {"DASHSCOPE_API_KEY", "DASHSCOPE_MODEL"}
+    assert s.version > v0
+    # 2) 读：DB 优先于 env
+    assert s.get("DASHSCOPE_API_KEY") == "FAKE_TEST_KEY_ZZZZ1234"
+    assert s.get("DASHSCOPE_MODEL") == "qwen-max"
+    # 3) get_all_effective：secret 必须脱敏
+    eff = s.get_all_effective()
+    assert eff["DASHSCOPE_API_KEY"]["is_secret"] is True
+    assert eff["DASHSCOPE_API_KEY"]["is_set"] is True
+    # 脱敏：前3 + **** + 后4。新 fixture 是 "FAKE_TEST_KEY_ZZZZ1234"（22 字符）
+    assert eff["DASHSCOPE_API_KEY"]["value"].startswith("FAK")
+    assert eff["DASHSCOPE_API_KEY"]["value"] != "FAKE_TEST_KEY_ZZZZ1234"
+    assert eff["DASHSCOPE_API_KEY"]["value"].endswith("1234")
+    assert "****" in eff["DASHSCOPE_API_KEY"]["value"]
+    # 非 secret 直接回显
+    assert eff["DASHSCOPE_MODEL"]["value"] == "qwen-max"
+    # 4) 空串=清除，回退到 env（这里 env 也空 → ""）
+    s.set_many({"DASHSCOPE_MODEL": ""})
+    assert s.get("DASHSCOPE_MODEL", default="") == ""
+    # 5) 白名单：所有键必须在白名单
+    for k in eff.keys():
+        assert k in ALLOWED_KEYS
+    # 6) mask 短串测试
+    assert _mask("") == ""
+    assert _mask("abc") == "****"
+    assert _mask("sk-abcdef1234") == "sk-****1234"
+
+
+def test_llm_router_picks_db_overrides(monkeypatch, tmp_path):
+    """LLMRouter 的 _api_key/_chat_model 等热改方法：DB 优先于 env/cfg。"""
+    monkeypatch.setenv("DATACHAT_LLM_SETTINGS_DB", str(tmp_path / "llm.db"))
+    # 重置 settings store singleton 以使用新路径
+    from app.core import llm_settings as ls_mod
+    ls_mod._store_singleton = None
+    from app.core.llm_settings import get_llm_settings_store
+    store = get_llm_settings_store()
+    store.set_many({
+        "DASHSCOPE_API_KEY": "FAKE_DB_KEY_ZZZ1234567890",
+        "DASHSCOPE_MODEL": "qwen-from-db",
+    })
+    # 不调真 LLM，只用 router 实例方法读
+    from app.core.llm.router import LLMRouter
+    r = LLMRouter()
+    assert r._api_key() == "FAKE_DB_KEY_ZZZ1234567890"
+    assert r._chat_model() == "qwen-from-db"
+    # 清空 → 回到 env（这里 env 没设）→ 回到 cfg 默认
+    store.set_many({"DASHSCOPE_MODEL": ""})
+    assert r._chat_model() == r.cfg.llm.bailian_chat_model
+
+
 def test_explain_gate_blocks_high_cost(monkeypatch):
     monkeypatch.setenv("DATACHAT_EXPLAIN_GATE", "1")
     monkeypatch.setenv("DATACHAT_EXPLAIN_MAX_ROWS", "100")

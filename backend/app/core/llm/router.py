@@ -18,6 +18,7 @@ from typing import Any, Iterable
 import httpx
 
 from app.core.config import LLMConfig, V1Config, load_config
+from app.core.llm_settings import get_llm_settings_store
 
 # 请求级模型路由 override：右上角下拉框选择"百炼 / 飞鹤"时由 main.py 在请求入口设置，
 # 通过 ContextVar 自动在 asyncio / SSE 流式调用栈里传播，不需要在 5+ 个方法签名里硬塞参数。
@@ -37,18 +38,18 @@ def get_request_provider() -> str | None:
 
 
 def available_providers() -> list[dict[str, Any]]:
-    """探测当前环境配置允许哪些 provider，给前端下拉框用。不暴露 key 值。"""
+    """探测当前**生效**配置允许哪些 provider；优先级 DB(管理页) > env > cfg 默认。不回显 key。"""
     cfg = load_config()
+    store = get_llm_settings_store()
     out: list[dict[str, Any]] = []
-    # 百炼直连：要 DASHSCOPE_API_KEY（或 cfg.llm.bailian_api_key）
-    bailian_key = (os.environ.get("DASHSCOPE_API_KEY") or cfg.llm.bailian_api_key or "").strip()
+    bailian_key = store.get("DASHSCOPE_API_KEY", default=cfg.llm.bailian_api_key).strip()
+    bailian_model = store.get("DASHSCOPE_MODEL", default=cfg.llm.bailian_chat_model).strip()
     if bailian_key:
         out.append({
             "id": "bailian",
-            "label": f"百炼 · {cfg.llm.bailian_chat_model}",
+            "label": f"百炼 · {bailian_model}",
             "hint": "DashScope 直连，单次 ~10s；走你的 AK，业务数据会发到阿里云。",
         })
-    # 飞鹤公司网关：要 AES_KEY + URL
     try:
         from app.core.llm.feihe_gateway import FeiheGatewayClient
         c = FeiheGatewayClient()
@@ -64,7 +65,8 @@ def available_providers() -> list[dict[str, Any]]:
 
 
 def default_provider() -> str:
-    return (os.environ.get("LLM_PROVIDER") or load_config().llm.primary_provider or "feihe").strip().lower()
+    store = get_llm_settings_store()
+    return store.get("LLM_PROVIDER", default=(load_config().llm.primary_provider or "feihe")).strip().lower() or "feihe"
 
 logger = logging.getLogger("datachat.llm")
 
@@ -101,16 +103,36 @@ class LLMRouter:
         )
         self._embedding_dim: int | None = None
         self._feihe = None  # lazy 飞鹤网关
+        self._settings = get_llm_settings_store()  # 阶段 4：管理页热改的 DB 存储
+
+    # ---- 阶段 4：可热改配置（DB 优先 → env → cfg 默认）----
+    def _api_key(self) -> str:
+        return (self._settings.get("DASHSCOPE_API_KEY", default=self.llm.bailian_api_key) or "").strip()
+
+    def _base_url(self) -> str:
+        return (self._settings.get("DASHSCOPE_BASE_URL", default=self.llm.bailian_base_url) or self.llm.bailian_base_url).strip()
+
+    def _chat_model(self) -> str:
+        return (self._settings.get("DASHSCOPE_MODEL", default=self.llm.bailian_chat_model) or self.llm.bailian_chat_model).strip()
+
+    def _bailian_embed_model(self) -> str:
+        return (self._settings.get("DASHSCOPE_EMBED_MODEL", default=self.llm.bailian_embed_model) or self.llm.bailian_embed_model).strip()
+
+    # 兼容 hybrid retriever 里直接读 `self.llm.bailian_embed_model` 的老代码
+    # 那是 LLMConfig 实例属性，无法动态改；提供一个等价的 router 属性供新代码使用。
+    @property
+    def bailian_embed_model(self) -> str:
+        return self._bailian_embed_model()
 
     # --------------------------------------------------------- provider switch
 
     def _use_feihe(self) -> bool:
-        # 路由优先级：① 本次请求 override（前端右上角下拉） ② env LLM_PROVIDER ③ config primary
+        # 路由优先级：① 本次请求 override（前端右上角下拉） ② DB/env LLM_PROVIDER ③ config primary
         override = _provider_override.get()
         if override:
             prov = override
         else:
-            prov = (os.environ.get("LLM_PROVIDER") or self.cfg.llm.primary_provider or "").strip().lower()
+            prov = self._settings.get("LLM_PROVIDER", default=self.cfg.llm.primary_provider or "").strip().lower()
         if prov != "feihe":
             return False
         try:
@@ -225,10 +247,10 @@ class LLMRouter:
         items = [str(x).strip() for x in inputs if str(x).strip()]
         if not items:
             return []
-        chosen = model or self.llm.bailian_embed_model
-        url = self.llm.bailian_base_url.rstrip("/") + "/embeddings"
+        chosen = model or self._bailian_embed_model()
+        url = self._base_url().rstrip("/") + "/embeddings"
         headers = {
-            "Authorization": f"Bearer {self.llm.bailian_api_key}",
+            "Authorization": f"Bearer {self._api_key()}",
             "Content-Type": "application/json",
         }
         out: list[list[float]] = []
@@ -264,12 +286,13 @@ class LLMRouter:
         json_mode: bool,
         model: str | None,
     ) -> LLMResult:
-        if not self.llm.bailian_api_key:
-            raise LLMError("Bailian / DashScope API key not configured (DASHSCOPE_API_KEY).")
-        chosen = model or self.llm.bailian_chat_model
-        url = self.llm.bailian_base_url.rstrip("/") + "/chat/completions"
+        _key = self._api_key()
+        if not _key:
+            raise LLMError("Bailian / DashScope API key not configured (后台→LLM 设置 里配置 DASHSCOPE_API_KEY)")
+        chosen = model or self._chat_model()
+        url = self._base_url().rstrip("/") + "/chat/completions"
         headers = {
-            "Authorization": f"Bearer {self.llm.bailian_api_key}",
+            "Authorization": f"Bearer {_key}",
             "Content-Type": "application/json",
         }
         payload: dict[str, Any] = {
