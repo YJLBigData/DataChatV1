@@ -291,13 +291,22 @@ fi
 lsof -ti tcp:$PORT 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
 cd "$BACKEND"
+# 阶段1.1：多 worker uvicorn（master + N children），充分利用多核
+#   · 本地默认 2 个 worker；可用 UVICORN_WORKERS=N 覆盖
+#   · --proxy-headers / --forwarded-allow-ips：让上层 nginx/LB 的真实 IP 与协议头透传
+#   · --timeout-keep-alive 30：长连接复用，降低握手开销
+UVICORN_WORKERS_LOCAL="${UVICORN_WORKERS:-2}"
+gray "  uvicorn workers=${UVICORN_WORKERS_LOCAL} (env UVICORN_WORKERS 可覆盖)"
 nohup "$PYBIN" -m uvicorn app.main:app \
   --host 127.0.0.1 --port $PORT --log-level info \
+  --workers "$UVICORN_WORKERS_LOCAL" \
+  --proxy-headers --forwarded-allow-ips '*' \
+  --timeout-keep-alive 30 \
   > "$LOG_DIR/backend.log" 2>&1 &
 echo $! > "$PID_FILE"
 
-# 等待健康检查
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+# 等待健康检查（多 worker 每个都跑一遍 warmup，给 30s）
+for i in $(seq 1 30); do
   sleep 1
   if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
     break
