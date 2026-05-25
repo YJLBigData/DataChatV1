@@ -185,6 +185,76 @@ class SemanticLayer:
                     return d
         return None
 
+    # ---------------- 阶段 3.1：多表 JOIN 图（默认能力，使用与否由 planner/guard 的 feature flag 决定） -------------
+
+    def joins_between(self, left: str, right: str) -> JoinDef | None:
+        """两张物理表之间是否有直接声明的 join（方向无关）。"""
+        if not left or not right or left == right:
+            return None
+        for j in self.joins.values():
+            if not j.safe:
+                continue
+            if (j.left == left and j.right == right) or (j.left == right and j.right == left):
+                return j
+        return None
+
+    def join_path(self, src: str, dst: str, max_hops: int = 2) -> list[JoinDef] | None:
+        """求两张物理表之间的最短 join 链（BFS，最多 max_hops 跳）。
+
+        返回 [JoinDef, ...]，路径上每一对相邻表之间都是声明且 safe=True 的 join。
+        不存在路径 → None。同一张表 → []。
+        本项目 5 张事实表全部以 summary 为中心成"星型"，所以 2 跳足以覆盖。
+        """
+        if not src or not dst:
+            return None
+        if src == dst:
+            return []
+        # 直连优先
+        direct = self.joins_between(src, dst)
+        if direct is not None:
+            return [direct]
+        if max_hops < 2:
+            return None
+        # 邻接表
+        adj: dict[str, list[tuple[str, JoinDef]]] = {}
+        for j in self.joins.values():
+            if not j.safe:
+                continue
+            adj.setdefault(j.left, []).append((j.right, j))
+            adj.setdefault(j.right, []).append((j.left, j))
+        # BFS
+        from collections import deque
+        q: deque[tuple[str, list[JoinDef]]] = deque([(src, [])])
+        visited = {src}
+        while q:
+            node, path = q.popleft()
+            if len(path) >= max_hops:
+                continue
+            for nxt, j in adj.get(node, []):
+                if nxt in visited:
+                    continue
+                new_path = path + [j]
+                if nxt == dst:
+                    return new_path
+                visited.add(nxt)
+                q.append((nxt, new_path))
+        return None
+
+    def can_join(self, tables: list[str]) -> bool:
+        """guard 使用：给定一组物理表，能否两两都通过 join 图连通（用 union-find 一遍跑掉）。"""
+        if not tables:
+            return True
+        # 任何两表之间存在 join_path 即视为连通
+        for i, a in enumerate(tables):
+            for b in tables[i + 1:]:
+                if a == b:
+                    continue
+                if self.join_path(a, b) is None:
+                    return False
+        return True
+
+    # ----------------------------------------------------------------------------------------
+
     def calculation_by_alias(self, alias: str) -> CalculationDef | None:
         token = (alias or "").strip().lower()
         if not token:
@@ -264,10 +334,24 @@ class SemanticLayer:
     def _load_joins(self, raw: dict[str, Any]) -> None:
         self.joins.clear()
         for name, body in raw.items():
-            on_pairs = []
-            for pair in body.get("on") or []:
-                if isinstance(pair, list) and len(pair) == 2:
+            # YAML 1.1 把字面量 `on:` 解析成布尔 True（PyYAML 默认行为）——
+            # 历史 semantic.yaml 里所有 join 的 `on:` 因此都丢成空。这里同时兜
+            # body['on']（字符串键）和 body[True]（被 booleanize 的键），并允许
+            # 用更安全的别名 `keys` / `cols` / `on_cols`。
+            raw_on = (
+                body.get("on")
+                or body.get(True)  # noqa: E712  YAML1.1 真坑
+                or body.get("on_cols")
+                or body.get("keys")
+                or body.get("cols")
+                or []
+            )
+            on_pairs: list[tuple[str, str]] = []
+            for pair in raw_on or []:
+                if isinstance(pair, (list, tuple)) and len(pair) == 2:
                     on_pairs.append((str(pair[0]), str(pair[1])))
+                elif isinstance(pair, dict) and "left" in pair and "right" in pair:
+                    on_pairs.append((str(pair["left"]), str(pair["right"])))
             self.joins[name] = JoinDef(
                 name=name,
                 left=str(body.get("left") or ""),

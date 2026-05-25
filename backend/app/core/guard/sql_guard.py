@@ -1,9 +1,15 @@
-"""SQL guardrails — read-only, single-statement, capped, schema-locked."""
+"""SQL guardrails — read-only, single-statement, capped, schema-locked.
+
+阶段 3.1 升级：当 `DATACHAT_ALLOW_MULTI_TABLE=1` 且传入了 semantic_layer 时，
+允许 SQL 包含多张表，**但每两两之间必须在 semantic.yaml 声明 join 路径**；
+默认（flag 关闭）保留旧行为：多表 SQL 一律拒绝（防 LLM 瞎 JOIN）。
+"""
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Any, Iterable
 
 from app.core.config import GuardConfig, load_config
 
@@ -37,9 +43,20 @@ _BLOCKED_NEAR_FRONT = re.compile(
 
 
 class SQLGuard:
-    def __init__(self, allowed_tables: Iterable[str], cfg: GuardConfig | None = None):
+    def __init__(
+        self,
+        allowed_tables: Iterable[str],
+        cfg: GuardConfig | None = None,
+        semantic_layer: Any | None = None,
+    ):
         self.cfg = cfg or load_config().guard
         self.allowed_tables = {t.lower() for t in allowed_tables}
+        # 阶段 3.1：semantic_layer 用于 can_join() 校验多表 JOIN；不传则只能跑单表
+        self.semantic_layer = semantic_layer
+
+    @staticmethod
+    def _multi_table_allowed() -> bool:
+        return (os.environ.get("DATACHAT_ALLOW_MULTI_TABLE") or "0").strip().lower() in ("1", "true", "yes", "on")
 
     def validate(self, sql: str) -> GuardReport:
         if not sql or not sql.strip():
@@ -58,6 +75,19 @@ class SQLGuard:
         unknown = [t for t in tables if t.lower() not in self.allowed_tables]
         if unknown:
             raise GuardError(f"包含未授权表：{unknown}")
+
+        # 阶段 3.1：多表 JOIN 校验
+        if len(tables) > 1:
+            if not self._multi_table_allowed():
+                raise GuardError(
+                    f"未启用多表 JOIN（DATACHAT_ALLOW_MULTI_TABLE=0）：SQL 含 {len(tables)} 张表 {tables}"
+                )
+            if self.semantic_layer is None:
+                raise GuardError("多表 JOIN 需配置 semantic_layer 才能校验 join 图")
+            if not self.semantic_layer.can_join(tables):
+                raise GuardError(
+                    f"SQL 中的表对未在 semantic.yaml 声明 join 路径：{tables}"
+                )
 
         sanitized = self._enforce_limit(cleaned)
         report = GuardReport(

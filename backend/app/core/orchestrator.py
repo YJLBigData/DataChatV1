@@ -80,7 +80,11 @@ class Pipeline:
         self.retriever = HybridRetriever(self.semantic, self.llm)
         self.planner = Planner(self.semantic, self.retriever, self.llm)
         self.compiler = PlanCompiler(self.semantic, default_limit=self.cfg.guard.max_rows)
-        self.guard = SQLGuard(allowed_tables=self.semantic.tables.keys(), cfg=self.cfg.guard)
+        self.guard = SQLGuard(
+            allowed_tables=self.semantic.tables.keys(),
+            cfg=self.cfg.guard,
+            semantic_layer=self.semantic,  # 阶段3.1：允许 DATACHAT_ALLOW_MULTI_TABLE 开启时按 join 图校验
+        )
         self.executor = get_executor()
         self.answerer = Answerer(self.semantic, self.llm)
         self.cache = get_cache()

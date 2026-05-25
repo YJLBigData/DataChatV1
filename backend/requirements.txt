@@ -44,3 +44,8 @@ pytest==8.3.5             # 自动化测试执行器
 # 认证与权限（v1.2 新增）
 bcrypt==4.2.1             # 密码哈希（Argon2/bcrypt，生产安全）
 PyJWT==2.10.1             # JWT 签发与校验（Access Token + Refresh Token）
+
+# —— 阶段 1.4 / 2.2 / 2.3 新增 ——
+slowapi>=0.1.9,<0.2       # 阶段 1.4：FastAPI/Starlette 限流，per-token 用户维 + per-IP 双层
+prometheus-fastapi-instrumentator>=7.0,<8.0  # 阶段 2.3：HTTP 直方图/计数/延迟自动采集，暴露 /metrics
+celery[redis]>=5.4,<6.0   # 阶段 2.2：异步任务队列（占位）；主问数链路仍走 SSE 不切 celery

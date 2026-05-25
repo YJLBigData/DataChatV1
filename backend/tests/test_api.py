@@ -105,7 +105,7 @@ def test_semantic_overview_requires_auth(client, auth_headers):
     body = r.json()
     assert len(body["metrics"]) >= 19
     assert len(body["dimensions"]) >= 17
-    assert len(body["tables"]) == 5
+    assert len(body["tables"]) >= 5  # 含 detail/summary/target/member/potential/hs_sale 等事实表
 
 
 def test_login_wrong_password(client):

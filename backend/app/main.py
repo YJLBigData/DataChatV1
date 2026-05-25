@@ -45,6 +45,28 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Red
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+# 阶段 1.4 / 2.3 / 2.4 —— 依赖缺失时静默降级（本地未 pip install 也能启动）
+try:
+    from slowapi import Limiter as _SlowLimiter, _rate_limit_exceeded_handler  # type: ignore
+    from slowapi.errors import RateLimitExceeded  # type: ignore
+    _SLOWAPI_OK = True
+except Exception:  # pragma: no cover
+    _SlowLimiter = None
+    _rate_limit_exceeded_handler = None
+    RateLimitExceeded = Exception  # type: ignore
+    _SLOWAPI_OK = False
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator as _PromInst  # type: ignore
+    _PROM_OK = True
+except Exception:  # pragma: no cover
+    _PromInst = None
+    _PROM_OK = False
+try:
+    from app.logging_setup import configure_logging as _configure_logging
+except Exception:  # pragma: no cover
+    def _configure_logging(force: bool = False) -> None:  # type: ignore
+        return None
+
 from app.core.auth import get_auth_store, AuthError, User
 from app.core.config import load_config
 from app.core.conversation import get_conversation_store
@@ -250,6 +272,8 @@ def require_admin(user: User = Depends(require_user)) -> User:
 # ----------------------------------------------------------------- app factory
 
 def create_app() -> FastAPI:
+    # 阶段 2.4：每个 uvicorn worker 启动时统一日志格式（JSON 单行；env DATACHAT_LOG_FORMAT=plain 回退）
+    _configure_logging()
     import os as _os
     cfg = load_config()
 
@@ -305,6 +329,39 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # 阶段 1.4 限流：per-token（含未登录退化到 IP）。模块缺失时静默降级（仅警告）。
+    if _SLOWAPI_OK and _SlowLimiter is not None:
+        def _identify_token(request: Request) -> str:
+            auth = request.headers.get("authorization", "") or ""
+            if auth.lower().startswith("bearer "):
+                return "tok:" + auth.split(" ", 1)[1][:24]
+            q = request.query_params.get("token") or ""
+            if q:
+                return "tok:" + q[:24]
+            return "ip:" + (request.client.host if request.client else "anon")
+        # 全局上限 + 关键端点单独再细一档（端点处用 @limiter.limit 覆盖）
+        _limiter = _SlowLimiter(key_func=_identify_token, default_limits=["120/minute"])
+        app.state.limiter = _limiter
+        app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+        logger.info("rate-limit enabled: default=120/min, /api/chat=30/min per token")
+    else:
+        app.state.limiter = None
+        logger.warning("slowapi not installed — running WITHOUT rate limiting")
+
+    # 阶段 2.3 Prometheus /metrics（HTTP 直方图/计数/延迟）。/metrics 不计入文档/不限流。
+    if _PROM_OK and _PromInst is not None:
+        try:
+            _PromInst(
+                should_group_status_codes=True,
+                should_ignore_untemplated=True,
+                excluded_handlers=["/metrics", "/health", "/api/health"],
+            ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False, tags=["observability"])
+            logger.info("prometheus /metrics exposed")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("prometheus instrument failed (skipped): %s", exc)
+    else:
+        logger.warning("prometheus-fastapi-instrumentator not installed — /metrics disabled")
 
     # 兜底异常处理：任何未捕获异常都只回友好 JSON + trace_id，
     # 绝不把 traceback / str(exc) / 连接串 暴露给用户；真实异常进日志。
@@ -678,14 +735,26 @@ def create_app() -> FastAPI:
 
     # ============================================================ chat
 
+    # 阶段 1.4：单接口限流。没装 slowapi 时为 no-op，不影响功能。
+    def _chat_limit(spec: str):
+        lim = getattr(app.state, "limiter", None)
+        if lim is not None:
+            return lim.limit(spec)
+        def _noop(func):
+            return func
+        return _noop
+
     @app.post("/api/chat")
-    def api_chat(req: ChatRequest = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
+    @_chat_limit("30/minute")
+    def api_chat(request: Request, req: ChatRequest = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
         from app.core.llm.router import set_request_provider
         set_request_provider(req.llm_provider)
         return _do_chat(get_pipe(), get_conversation_store(), user, req, on_event=None)
 
     @app.post("/api/chat/stream")
+    @_chat_limit("30/minute")
     async def api_chat_stream(
+        request: Request,
         req: ChatRequest = Body(...),
         token: Optional[str] = Query(None),
         authorization: Optional[str] = Header(None),

@@ -56,6 +56,36 @@ class MySQLExecutor:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    # 阶段 3.3：EXPLAIN 成本闸门（默认关闭）。
+    # 开关：DATACHAT_EXPLAIN_GATE=1；阈值：DATACHAT_EXPLAIN_MAX_ROWS（默认 1_000_000）。
+    # 若 EXPLAIN 估算扫描行数 > 阈值，直接拒绝；防止"全表 + 多 JOIN"把 ADB 拖垮。
+    def _maybe_explain_gate(self, sql: str, conn) -> None:
+        import os as _os
+        if (_os.environ.get("DATACHAT_EXPLAIN_GATE") or "0").strip().lower() not in ("1", "true", "yes", "on"):
+            return
+        try:
+            max_rows_threshold = int(_os.environ.get("DATACHAT_EXPLAIN_MAX_ROWS") or 1_000_000)
+        except ValueError:
+            max_rows_threshold = 1_000_000
+        try:
+            er = conn.execute(text("EXPLAIN " + sql))
+            est_total = 0
+            for row in er:
+                # MySQL EXPLAIN 输出包含 `rows` 列：每张表估算扫描行数
+                d = dict(zip(er.keys(), row))
+                try:
+                    est_total += int(d.get("rows") or 0)
+                except (TypeError, ValueError):
+                    pass
+            if est_total > max_rows_threshold:
+                raise ExecError(
+                    f"EXPLAIN 成本闸门拦截：估算扫描 {est_total} 行 > 阈值 {max_rows_threshold}（请缩小时间/维度范围）"
+                )
+        except DBAPIError as exc:
+            # EXPLAIN 失败不阻塞主查询；仅记日志
+            import logging as _l
+            _l.getLogger("datachat.exec").warning("EXPLAIN gate skipped: %s", exc)
+
     def run_select(self, sql: str, *, max_rows: int | None = None, timeout_ms: int | None = None) -> ExecResult:
         if not _SELECT_HEAD.match(sql):
             raise ExecError("Only SELECT statements are allowed.")
@@ -73,6 +103,8 @@ class MySQLExecutor:
         try:
             with self.engine.connect() as conn:
                 conn.execute(text("SET SESSION group_concat_max_len = 4096"))
+                # 阶段 3.3：EXPLAIN 成本闸门（feature flag 默认关闭）
+                self._maybe_explain_gate(sql, conn)
                 result = conn.execute(text(sql_with_hint))
                 columns = list(result.keys())
                 rows: list[list[Any]] = []
