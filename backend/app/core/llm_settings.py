@@ -122,9 +122,9 @@ class LLMSettingsStore:
                     if cur.rowcount > 0:
                         changed.append(k)
                 else:
+                    # 用 INSERT OR REPLACE 兼容 CentOS7 老 SQLite 3.7（不支持 ON CONFLICT DO UPDATE）
                     c.execute(
-                        "INSERT INTO llm_settings(key, value, updated_at) VALUES(?,?,?)"
-                        " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                        "INSERT OR REPLACE INTO llm_settings(key, value, updated_at) VALUES(?,?,?)",
                         (k, str(v), time.time()),
                     )
                     changed.append(k)
