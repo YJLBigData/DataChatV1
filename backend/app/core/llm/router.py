@@ -19,6 +19,7 @@ import httpx
 
 from app.core.config import LLMConfig, V1Config, load_config
 from app.core.llm_settings import get_llm_settings_store
+from app.core.llm_presets import get_llm_presets_store, LLMPreset
 
 # 请求级模型路由 override：右上角下拉框选择"百炼 / 飞鹤"时由 main.py 在请求入口设置，
 # 通过 ContextVar 自动在 asyncio / SSE 流式调用栈里传播，不需要在 5+ 个方法签名里硬塞参数。
@@ -38,33 +39,48 @@ def get_request_provider() -> str | None:
 
 
 def available_providers() -> list[dict[str, Any]]:
-    """探测当前**生效**配置允许哪些 provider；优先级 DB(管理页) > env > cfg 默认。不回显 key。"""
+    """前端右上角下拉。优先列「管理页已保存的预设」；
+    没有预设时回退到 legacy 单条 + 飞鹤静态。不回显 key。"""
+    out: list[dict[str, Any]] = []
+    presets = get_llm_presets_store().list_all(include_inactive=False)
+    if presets:
+        for p in presets:
+            if p.provider == "bailian" and not p.api_key:
+                continue  # 没 AK 的 bailian preset 不放出来（无法用）
+            out.append({
+                "id": p.id,
+                "label": p.name,
+                "hint": ("百炼 · " if p.provider == "bailian" else "飞鹤 · ") + (p.model or ""),
+                "provider": p.provider,
+                "is_default": p.is_default,
+            })
+        return out
+    # ---- 没有预设 → legacy 兼容 ----
     cfg = load_config()
     store = get_llm_settings_store()
-    out: list[dict[str, Any]] = []
     bailian_key = store.get("DASHSCOPE_API_KEY", default=cfg.llm.bailian_api_key).strip()
     bailian_model = store.get("DASHSCOPE_MODEL", default=cfg.llm.bailian_chat_model).strip()
     if bailian_key:
-        out.append({
-            "id": "bailian",
-            "label": f"百炼 · {bailian_model}",
-            "hint": "DashScope 直连，单次 ~10s；走你的 AK，业务数据会发到阿里云。",
-        })
+        out.append({"id": "bailian", "label": f"百炼 · {bailian_model}",
+                    "hint": "DashScope 直连，单次 ~10s；走你的 AK，业务数据会发到阿里云。",
+                    "provider": "bailian", "is_default": False})
     try:
         from app.core.llm.feihe_gateway import FeiheGatewayClient
         c = FeiheGatewayClient()
         if c.configured:
-            out.append({
-                "id": "feihe",
-                "label": f"飞鹤 · {c.agent_code}",
-                "hint": "公司 ADP Agent，业务数据不出公司网；单次 ~30-120s。",
-            })
+            out.append({"id": "feihe", "label": f"飞鹤 · {c.agent_code}",
+                        "hint": "公司 ADP Agent，业务数据不出公司网；单次 ~30-120s。",
+                        "provider": "feihe", "is_default": False})
     except Exception:  # noqa: BLE001
         pass
     return out
 
 
 def default_provider() -> str:
+    """默认选项 id：先看默认 preset；否则 legacy LLM_PROVIDER；最后 'feihe'。"""
+    p = get_llm_presets_store().get_default()
+    if p:
+        return p.id
     store = get_llm_settings_store()
     return store.get("LLM_PROVIDER", default=(load_config().llm.primary_provider or "feihe")).strip().lower() or "feihe"
 
@@ -103,19 +119,48 @@ class LLMRouter:
         )
         self._embedding_dim: int | None = None
         self._feihe = None  # lazy 飞鹤网关
-        self._settings = get_llm_settings_store()  # 阶段 4：管理页热改的 DB 存储
+        self._settings = get_llm_settings_store()      # 旧版单条配置（legacy）
+        self._presets = get_llm_presets_store()        # 新版多套预设
 
-    # ---- 阶段 4：可热改配置（DB 优先 → env → cfg 默认）----
+    # ---- 阶段 5：多套 preset，preset 选不到再回退到 legacy llm_settings → env → cfg 默认 ----
+    def _active_preset(self) -> LLMPreset | None:
+        """请求级 override 优先；否则用全局 default preset。"""
+        override = (_provider_override.get() or "").strip()
+        if override:
+            # 1) 直接当 preset id（uuid）查
+            p = self._presets.get(override)
+            if p and p.is_active:
+                return p
+            # 2) 兼容旧值 "bailian" / "feihe"：取第一条匹配 provider 的活跃 preset
+            if override in ("bailian", "feihe"):
+                for cand in self._presets.list_all():
+                    if cand.provider == override:
+                        return cand
+        # 3) 全局默认 preset
+        return self._presets.get_default()
+
     def _api_key(self) -> str:
+        p = self._active_preset()
+        if p and p.provider == "bailian":
+            return (p.api_key or "").strip()
         return (self._settings.get("DASHSCOPE_API_KEY", default=self.llm.bailian_api_key) or "").strip()
 
     def _base_url(self) -> str:
+        p = self._active_preset()
+        if p and p.provider == "bailian" and p.base_url:
+            return p.base_url.strip()
         return (self._settings.get("DASHSCOPE_BASE_URL", default=self.llm.bailian_base_url) or self.llm.bailian_base_url).strip()
 
     def _chat_model(self) -> str:
+        p = self._active_preset()
+        if p and p.provider == "bailian" and p.model:
+            return p.model.strip()
         return (self._settings.get("DASHSCOPE_MODEL", default=self.llm.bailian_chat_model) or self.llm.bailian_chat_model).strip()
 
     def _bailian_embed_model(self) -> str:
+        p = self._active_preset()
+        if p and p.provider == "bailian" and p.embed_model:
+            return p.embed_model.strip()
         return (self._settings.get("DASHSCOPE_EMBED_MODEL", default=self.llm.bailian_embed_model) or self.llm.bailian_embed_model).strip()
 
     # 兼容 hybrid retriever 里直接读 `self.llm.bailian_embed_model` 的老代码
@@ -127,10 +172,10 @@ class LLMRouter:
     # --------------------------------------------------------- provider switch
 
     def _use_feihe(self) -> bool:
-        # 路由优先级：① 本次请求 override（前端右上角下拉） ② DB/env LLM_PROVIDER ③ config primary
-        override = _provider_override.get()
-        if override:
-            prov = override
+        # 路由优先级：① 当前 active preset 的 provider ② legacy 单条 LLM_PROVIDER ③ cfg primary
+        p = self._active_preset()
+        if p:
+            prov = p.provider
         else:
             prov = self._settings.get("LLM_PROVIDER", default=self.cfg.llm.primary_provider or "").strip().lower()
         if prov != "feihe":

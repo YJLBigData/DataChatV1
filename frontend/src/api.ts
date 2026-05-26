@@ -282,6 +282,58 @@ export const api = {
       body: JSON.stringify(req),
     }),
 
+  /* ---------- admin: 多套 LLM 预设（preset） ---------- */
+  adminListLLMPresets: () =>
+    jsonReq<{ items: import("./types").LLMPreset[] }>("/api/admin/llm-presets"),
+
+  adminTestLLMPresetCandidate: (req: {
+    provider: "bailian" | "feihe";
+    api_key?: string;
+    base_url?: string;
+    model: string;
+    prompt?: string;
+  }) =>
+    jsonReq<import("./types").LLMPresetTestResult>("/api/admin/llm-presets/test", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
+  adminCreateLLMPreset: (req: {
+    name: string;
+    provider: "bailian" | "feihe";
+    api_key?: string;
+    base_url?: string;
+    model: string;
+    embed_model?: string;
+  }) =>
+    jsonReq<{ ok: boolean; preset: import("./types").LLMPreset }>("/api/admin/llm-presets", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
+  adminUpdateLLMPreset: (id: string, req: {
+    name?: string;
+    provider?: "bailian" | "feihe";
+    api_key?: string | null;
+    base_url?: string | null;
+    model?: string;
+    embed_model?: string | null;
+    is_active?: boolean;
+  }) =>
+    jsonReq<{ ok: boolean; preset: import("./types").LLMPreset }>(`/api/admin/llm-presets/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(req),
+    }),
+
+  adminDeleteLLMPreset: (id: string) =>
+    jsonReq<{ ok: boolean }>(`/api/admin/llm-presets/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  adminSetDefaultLLMPreset: (id: string) =>
+    jsonReq<{ ok: boolean }>(`/api/admin/llm-presets/${encodeURIComponent(id)}/set-default`, { method: "POST" }),
+
+  adminTestExistingLLMPreset: (id: string) =>
+    jsonReq<import("./types").LLMPresetTestResult>(`/api/admin/llm-presets/${encodeURIComponent(id)}/test`, { method: "POST" }),
+
   /* ---------- 飞书 ---------- */
   feishuPush: (req: {
     title: string;

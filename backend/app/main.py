@@ -175,12 +175,40 @@ class ReportTemplatePatchReq(BaseModel):
 
 
 class LLMSettingsPutReq(BaseModel):
-    """管理页提交的 LLM 设置（全部可选；None=不动；""=清除该键回退到 env/默认）。"""
+    """[legacy] 管理页旧的"单条配置"接口入参（None=不动；""=清除）。新前端走 preset CRUD。"""
     DASHSCOPE_API_KEY: Optional[str] = Field(default=None, description="百炼 AK，sk-...")
     DASHSCOPE_BASE_URL: Optional[str] = Field(default=None, description="百炼 base URL")
     DASHSCOPE_MODEL: Optional[str] = Field(default=None, description="百炼 chat 模型名 (qwen-plus / qwen-max / qwen3.6-max-preview 等)")
     DASHSCOPE_EMBED_MODEL: Optional[str] = Field(default=None, description="百炼 embedding 模型 (text-embedding-v3 等)")
     LLM_PROVIDER: Optional[str] = Field(default=None, description="默认 provider: bailian / feihe")
+
+
+class LLMPresetCreateReq(BaseModel):
+    name: str = Field(..., description="显示名，唯一")
+    provider: str = Field(..., description="'bailian' 或 'feihe'")
+    api_key: str = Field("", description="bailian 必填；feihe 留空（AES_KEY 在服务器 .env）")
+    base_url: str = Field("", description="bailian: https://dashscope.aliyuncs.com/compatible-mode/v1")
+    model: str = Field(..., description="chat 模型名（如 qwen-plus / qwen-max）")
+    embed_model: str = Field("", description="bailian 才用，如 text-embedding-v3")
+
+
+class LLMPresetPatchReq(BaseModel):
+    name: Optional[str] = None
+    provider: Optional[str] = None
+    api_key: Optional[str] = None   # None=不动；""=清空；非空=替换
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    embed_model: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class LLMPresetTestReq(BaseModel):
+    """保存前测试：用候选配置直发一次 chat，不写库。"""
+    provider: str
+    api_key: str = ""
+    base_url: str = ""
+    model: str
+    prompt: Optional[str] = None
 
 
 class FolderCreateReq(BaseModel):
@@ -768,6 +796,98 @@ def create_app() -> FastAPI:
         changed = store.set_many(updates)
         logger.info("admin llm-settings update keys=%s", changed)
         return {"ok": True, "updated": changed, "version": store.version}
+
+    # ============================================================ admin: llm presets (multi-LLM)
+    @app.get("/api/admin/llm-presets")
+    def api_admin_list_llm_presets(_: User = Depends(require_admin)) -> dict[str, Any]:
+        from app.core.llm_presets import get_llm_presets_store
+        return {"items": [p.to_dict_masked() for p in get_llm_presets_store().list_all(include_inactive=True)]}
+
+    @app.post("/api/admin/llm-presets/test")
+    def api_admin_test_llm_preset_candidate(
+        req: LLMPresetTestReq = Body(...),
+        _: User = Depends(require_admin),
+    ) -> dict[str, Any]:
+        """保存前测试：用候选配置直接发一句问题，必须收到非空回复才返回 ok=True；不写库。"""
+        from app.core.llm.test_runner import test_preset_config, DEFAULT_TEST_PROMPT
+        result = test_preset_config(
+            req.provider,
+            api_key=req.api_key, base_url=req.base_url,
+            model=req.model,
+        )
+        result["prompt"] = req.prompt or DEFAULT_TEST_PROMPT
+        return result
+
+    @app.post("/api/admin/llm-presets")
+    def api_admin_create_llm_preset(
+        req: LLMPresetCreateReq = Body(...),
+        _: User = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from app.core.llm_presets import get_llm_presets_store
+        try:
+            p = get_llm_presets_store().create(
+                name=req.name, provider=req.provider, api_key=req.api_key,
+                base_url=req.base_url, model=req.model, embed_model=req.embed_model,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True, "preset": p.to_dict_masked()}
+
+    @app.put("/api/admin/llm-presets/{preset_id}")
+    def api_admin_update_llm_preset(
+        preset_id: str,
+        req: LLMPresetPatchReq = Body(...),
+        _: User = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from app.core.llm_presets import get_llm_presets_store
+        try:
+            p = get_llm_presets_store().update(
+                preset_id,
+                name=req.name, provider=req.provider, api_key=req.api_key,
+                base_url=req.base_url, model=req.model, embed_model=req.embed_model,
+                is_active=req.is_active,
+            )
+        except ValueError as exc:
+            code = 404 if "不存在" in str(exc) else 400
+            raise HTTPException(status_code=code, detail=str(exc))
+        return {"ok": True, "preset": p.to_dict_masked()}
+
+    @app.delete("/api/admin/llm-presets/{preset_id}")
+    def api_admin_delete_llm_preset(
+        preset_id: str,
+        _: User = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from app.core.llm_presets import get_llm_presets_store
+        get_llm_presets_store().delete(preset_id)
+        return {"ok": True}
+
+    @app.post("/api/admin/llm-presets/{preset_id}/set-default")
+    def api_admin_set_default_llm_preset(
+        preset_id: str,
+        _: User = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from app.core.llm_presets import get_llm_presets_store
+        try:
+            get_llm_presets_store().set_default(preset_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {"ok": True}
+
+    @app.post("/api/admin/llm-presets/{preset_id}/test")
+    def api_admin_test_existing_llm_preset(
+        preset_id: str,
+        _: User = Depends(require_admin),
+    ) -> dict[str, Any]:
+        """对已存的 preset 跑一发测试，把结果写回 last_test_*"""
+        from app.core.llm_presets import get_llm_presets_store
+        from app.core.llm.test_runner import test_preset_config
+        store = get_llm_presets_store()
+        p = store.get(preset_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="preset 不存在")
+        result = test_preset_config(p.provider, api_key=p.api_key, base_url=p.base_url, model=p.model)
+        store.record_test(preset_id, bool(result.get("ok")), str(result.get("text") or result.get("error") or ""))
+        return result
 
     # ============================================================ chat
 

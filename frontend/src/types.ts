@@ -246,3 +246,29 @@ export interface LLMSettingItem {
 export interface LLMSettingsResp {
   settings: Record<string, LLMSettingItem>;
 }
+
+export interface LLMPreset {
+  id: string;
+  name: string;
+  provider: "bailian" | "feihe";
+  api_key: string;          // masked
+  api_key_set: boolean;
+  base_url: string;
+  model: string;
+  embed_model: string;
+  is_default: boolean;
+  is_active: boolean;
+  last_tested_at: number;
+  last_test_ok: boolean;
+  last_test_response: string;
+  created_at: number;
+  updated_at: number;
+}
+export interface LLMPresetTestResult {
+  ok: boolean;
+  latency_ms: number;
+  text?: string;
+  error?: string;
+  model_echo?: string;
+  prompt?: string;
+}

@@ -289,6 +289,89 @@ def test_llm_router_picks_db_overrides(monkeypatch, tmp_path):
     assert r._chat_model() == r.cfg.llm.bailian_chat_model
 
 
+def test_llm_presets_crud_and_default_flow(tmp_path, monkeypatch):
+    """多 preset：创建/更新/删除/setDefault；首条自动 default；删 default 自动顶替"""
+    monkeypatch.setenv("DATACHAT_LLM_PRESETS_DB", str(tmp_path / "llm_presets.db"))
+    from app.core import llm_presets as lp_mod
+    lp_mod._singleton = None
+    from app.core.llm_presets import get_llm_presets_store
+    s = get_llm_presets_store()
+
+    a = s.create(name="bailian-qwen-plus", provider="bailian",
+                 api_key="FAKE_AAAA1234567890", base_url="https://x/v1",
+                 model="qwen-plus", embed_model="text-embedding-v3")
+    assert a.is_default is True            # 首条自动默认
+
+    b = s.create(name="bailian-qwen-max", provider="bailian",
+                 api_key="FAKE_BBBB1234567890", base_url="https://x/v1",
+                 model="qwen-max")
+    assert b.is_default is False
+    assert len(s.list_all()) == 2
+
+    # set_default → b
+    s.set_default(b.id)
+    assert s.get_default().id == b.id
+    assert s.get(a.id).is_default is False
+
+    # mask
+    d = a.to_dict_masked()
+    assert d["api_key_set"] is True
+    assert d["api_key"] != "FAKE_AAAA1234567890"
+    assert "****" in d["api_key"]
+
+    # update name 重复 → 400
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        s.update(a.id, name="bailian-qwen-max")
+
+    # delete b（默认）→ 自动把 a 顶为 default
+    s.delete(b.id)
+    assert s.get_default().id == a.id
+
+    # provider 校验
+    with _pt.raises(ValueError):
+        s.create(name="bad", provider="claude", api_key="x", model="m")
+    # bailian 必须有 ak
+    with _pt.raises(ValueError):
+        s.create(name="no-ak", provider="bailian", api_key="", model="qwen-plus")
+
+
+def test_test_runner_unknown_provider():
+    from app.core.llm.test_runner import test_preset_config
+    r = test_preset_config("claude", api_key="x", model="x")
+    assert r["ok"] is False
+    assert "不支持" in r["error"]
+
+
+def test_router_active_preset_overrides_legacy(tmp_path, monkeypatch):
+    """有 preset 时 router 应当从 preset 取 model/api_key；无 preset 时回退 legacy。"""
+    monkeypatch.setenv("DATACHAT_LLM_PRESETS_DB", str(tmp_path / "p.db"))
+    monkeypatch.setenv("DATACHAT_LLM_SETTINGS_DB", str(tmp_path / "s.db"))
+    for k in ["DASHSCOPE_API_KEY", "DASHSCOPE_MODEL"]:
+        monkeypatch.setenv(k, "")
+    # 重置单例
+    from app.core import llm_presets as lp_mod, llm_settings as ls_mod
+    lp_mod._singleton = None
+    ls_mod._store_singleton = None
+
+    from app.core.llm.router import LLMRouter
+    from app.core.llm_presets import get_llm_presets_store
+    r = LLMRouter()
+    # 没有 preset 时走 cfg 默认
+    assert r._chat_model() == r.cfg.llm.bailian_chat_model
+
+    # 建一个 preset，应当优先
+    p = get_llm_presets_store().create(
+        name="t1", provider="bailian",
+        api_key="FAKE_TESTAK_1234567890",
+        base_url="https://x/v1", model="qwen-plus-from-preset",
+        embed_model="text-embedding-v3",
+    )
+    assert r._chat_model() == "qwen-plus-from-preset"
+    assert r._api_key() == "FAKE_TESTAK_1234567890"
+    assert r._base_url() == "https://x/v1"
+
+
 def test_explain_gate_blocks_high_cost(monkeypatch):
     monkeypatch.setenv("DATACHAT_EXPLAIN_GATE", "1")
     monkeypatch.setenv("DATACHAT_EXPLAIN_MAX_ROWS", "100")

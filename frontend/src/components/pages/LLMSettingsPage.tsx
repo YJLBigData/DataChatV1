@@ -1,42 +1,50 @@
 import { useEffect, useState } from "react";
 
 import { api } from "../../api";
-import type { LLMSettingItem } from "../../types";
+import type { LLMPreset, LLMPresetTestResult } from "../../types";
 
-/** LLM 设置（仅 admin）—— 百炼 AK / base / 模型 + 默认 provider；
- *  改完点保存即刻生效（写 SQLite，下次 LLM 调用自动读，不需要重启）。
- *  Secret 永远脱敏显示，编辑要点「修改」清空再填新值。
+/** LLM 设置（仅 admin）—— 多套预设（preset）+ 保存前强制测试。
+ *  · 列表展示所有预设；可点「设为默认」/「编辑」/「测试」/「删除」
+ *  · 「新建」打开模态框：填表 → 测试 → 只有测试通过（拿到非空回复）才允许保存
+ *  · 顶部右上角下拉自动用这里的列表
  */
-type SettingsMap = Record<string, LLMSettingItem>;
+type DraftPreset = {
+  id?: string;
+  name: string;
+  provider: "bailian" | "feihe";
+  api_key: string;        // 编辑已有 secret 时初值为 ""（用户必须重新输入或留空保留旧值）
+  api_key_touched: boolean; // 仅当 true 才把 api_key 发到后端（避免覆盖为空）
+  base_url: string;
+  model: string;
+  embed_model: string;
+};
 
-const FIELDS: { key: string; label: string; hint?: string; placeholder?: string; isSecret?: boolean }[] = [
-  { key: "DASHSCOPE_API_KEY", label: "DashScope API Key", hint: "百炼/阿里云 sk- 开头的 AK", placeholder: "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", isSecret: true },
-  { key: "DASHSCOPE_BASE_URL", label: "DashScope Base URL", hint: "默认 https://dashscope.aliyuncs.com/compatible-mode/v1", placeholder: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
-  { key: "DASHSCOPE_MODEL", label: "Chat 模型", hint: "qwen-plus / qwen-max / qwen3.6-max-preview / qwen-turbo / ...", placeholder: "qwen-plus" },
-  { key: "DASHSCOPE_EMBED_MODEL", label: "Embedding 模型", hint: "默认 text-embedding-v3；切换会让检索向量缓存失效", placeholder: "text-embedding-v3" },
-];
-
-const PROVIDER_OPTIONS = [
-  { value: "bailian", label: "百炼（DashScope 直连）" },
-  { value: "feihe", label: "飞鹤（公司 ADP 网关）" },
-];
+const EMPTY_DRAFT: DraftPreset = {
+  name: "", provider: "bailian", api_key: "", api_key_touched: false,
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  model: "qwen-plus", embed_model: "text-embedding-v3",
+};
 
 export function LLMSettingsPage() {
-  const [data, setData] = useState<SettingsMap | null>(null);
+  const [items, setItems] = useState<LLMPreset[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [edits, setEdits] = useState<Record<string, string | null>>({}); // null=不动，""=清除，"xxx"=新值
-  const [secretUnlocked, setSecretUnlocked] = useState<Record<string, boolean>>({});
-  const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+
+  const [modalOpen, setModalOpen] = useState(false);
+  const [draft, setDraft] = useState<DraftPreset>(EMPTY_DRAFT);
+  const [editing, setEditing] = useState<LLMPreset | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [testResult, setTestResult] = useState<LLMPresetTestResult | null>(null);
+  // 标记"当前 testResult 对应的草稿快照"，避免改了字段后还能用旧测试结果保存
+  const [testSnapshot, setTestSnapshot] = useState<string>("");
 
   async function refresh() {
     setLoading(true); setErr(null);
     try {
-      const r = await api.adminGetLLMSettings();
-      setData(r.settings);
-      setEdits({});
-      setSecretUnlocked({});
+      const r = await api.adminListLLMPresets();
+      setItems(r.items || []);
     } catch (e: any) {
       setErr(e?.message || String(e));
     } finally {
@@ -45,24 +53,96 @@ export function LLMSettingsPage() {
   }
   useEffect(() => { refresh(); }, []);
 
-  function setEdit(key: string, val: string) {
-    setEdits((p) => ({ ...p, [key]: val }));
+  function openCreate() {
+    setEditing(null);
+    setDraft(EMPTY_DRAFT);
+    setTestResult(null); setTestSnapshot("");
+    setModalOpen(true);
   }
-  function clearField(key: string) {
-    if (!confirm(`确定要清除「${key}」？\n下次将回退到环境变量或代码默认。`)) return;
-    setEdits((p) => ({ ...p, [key]: "" }));
+  function openEdit(p: LLMPreset) {
+    setEditing(p);
+    setDraft({
+      id: p.id,
+      name: p.name,
+      provider: p.provider,
+      api_key: "",                // 不回显旧密文；用户不改就传 null（保留）
+      api_key_touched: false,
+      base_url: p.base_url,
+      model: p.model,
+      embed_model: p.embed_model,
+    });
+    setTestResult(null); setTestSnapshot("");
+    setModalOpen(true);
   }
-  function unlockSecret(key: string) {
-    setSecretUnlocked((p) => ({ ...p, [key]: true }));
-    setEdits((p) => ({ ...p, [key]: "" })); // 解锁时先清成空，等用户输新
+  function closeModal() {
+    if (saving || testing) return;
+    setModalOpen(false);
+  }
+
+  function draftKey(d: DraftPreset): string {
+    // 用于判断 testResult 是否还对应当前草稿（任何相关字段变化都失效）
+    return [d.provider, d.api_key_touched ? d.api_key : "(keep)", d.base_url, d.model].join("|");
+  }
+  const testValid = testResult?.ok && testSnapshot === draftKey(draft);
+
+  async function runTest() {
+    if (!draft.model.trim()) { setErr("model 必填"); return; }
+    if (draft.provider === "bailian" && draft.api_key_touched && !draft.api_key.trim()) {
+      setErr("bailian provider 必须填 api_key（或者点取消保留原 key）"); return;
+    }
+    setTesting(true); setErr(null); setTestResult(null);
+    try {
+      // 编辑场景：未输入新 key 时把后端已存的 key 也带过去测一发？后端 /test 不读库，
+      // 这里测的是"用户当前看到/即将保存的配置"。未触碰旧 key → 用空 api_key 测会失败。
+      // 解决：编辑时若未触碰，让后端用 preset id 测（用 existing test endpoint）。
+      let res: LLMPresetTestResult;
+      if (editing && !draft.api_key_touched && draft.provider === "bailian") {
+        // 测已存的（用旧 key），但前端字段改的 model/base 还没保存——提示用户先存
+        res = await api.adminTestExistingLLMPreset(editing.id);
+      } else {
+        res = await api.adminTestLLMPresetCandidate({
+          provider: draft.provider,
+          api_key: draft.api_key,
+          base_url: draft.base_url,
+          model: draft.model,
+        });
+      }
+      setTestResult(res);
+      if (res.ok) setTestSnapshot(draftKey(draft));
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    } finally {
+      setTesting(false);
+    }
   }
 
   async function save() {
-    if (Object.keys(edits).length === 0) { setToast("没有改动"); return; }
+    if (!testValid) { setErr("请先点「测试连接」并通过后再保存"); return; }
+    if (!draft.name.trim()) { setErr("预设名不能为空"); return; }
     setSaving(true); setErr(null);
     try {
-      const r = await api.adminPutLLMSettings(edits);
-      setToast(`已保存 ${r.updated.length} 项（v${r.version}）`);
+      if (editing) {
+        await api.adminUpdateLLMPreset(editing.id, {
+          name: draft.name,
+          provider: draft.provider,
+          api_key: draft.api_key_touched ? draft.api_key : null, // null = 后端"不动"
+          base_url: draft.base_url,
+          model: draft.model,
+          embed_model: draft.embed_model,
+        });
+        setToast(`已更新预设：${draft.name}`);
+      } else {
+        await api.adminCreateLLMPreset({
+          name: draft.name,
+          provider: draft.provider,
+          api_key: draft.api_key,
+          base_url: draft.base_url,
+          model: draft.model,
+          embed_model: draft.embed_model,
+        });
+        setToast(`已创建预设：${draft.name}`);
+      }
+      setModalOpen(false);
       await refresh();
       setTimeout(() => setToast(null), 4000);
     } catch (e: any) {
@@ -72,21 +152,36 @@ export function LLMSettingsPage() {
     }
   }
 
-  const hasEdits = Object.keys(edits).length > 0;
-  const currentProvider = data?.LLM_PROVIDER?.value || "";
-  const draftProvider = edits.LLM_PROVIDER ?? currentProvider;
+  async function setAsDefault(p: LLMPreset) {
+    try { await api.adminSetDefaultLLMPreset(p.id); setToast(`已把「${p.name}」设为默认`); await refresh(); setTimeout(() => setToast(null), 3000); }
+    catch (e: any) { setErr(e?.message || String(e)); }
+  }
+  async function remove(p: LLMPreset) {
+    if (!confirm(`确定删除预设「${p.name}」？\n它将被软删除（is_active=0）。`)) return;
+    try { await api.adminDeleteLLMPreset(p.id); setToast(`已删除「${p.name}」`); await refresh(); setTimeout(() => setToast(null), 3000); }
+    catch (e: any) { setErr(e?.message || String(e)); }
+  }
+  async function testOne(p: LLMPreset) {
+    setToast(`测试中…「${p.name}」`);
+    try {
+      const r = await api.adminTestExistingLLMPreset(p.id);
+      setToast(r.ok ? `✓ ${p.name}：${(r.text||'').slice(0, 60)} (${r.latency_ms}ms)` : `✗ ${p.name}：${r.error || '未知错误'}`);
+      await refresh();
+      setTimeout(() => setToast(null), 6000);
+    } catch (e: any) { setErr(e?.message || String(e)); }
+  }
 
   return (
     <div className="flex h-full flex-col">
       <header className="border-b bg-white px-5 py-3" style={{ borderColor: "#eef1f8" }}>
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-[15px] font-semibold tracking-tight text-slate-800">LLM 设置</div>
-            <div className="text-[12px] text-slate-400">百炼 AK / 模型 / 默认 Provider —— 改完即时生效，无需重启</div>
+            <div className="text-[15px] font-semibold tracking-tight text-slate-800">LLM 设置（多套预设）</div>
+            <div className="text-[12px] text-slate-400">每个预设 = 一套 provider + AK + 模型；右上角下拉切换即换模型；保存前必测</div>
           </div>
           <div className="flex items-center gap-2">
             <button className="qq-btn px-3 py-1.5 text-xs" onClick={refresh} disabled={loading}>{loading ? "加载…" : "刷新"}</button>
-            <button className="qq-btn-primary px-3 py-1.5 text-xs" onClick={save} disabled={!hasEdits || saving}>{saving ? "保存中…" : `保存${hasEdits ? `（${Object.keys(edits).length} 项改动）` : ""}`}</button>
+            <button className="qq-btn-primary px-3 py-1.5 text-xs" onClick={openCreate}>新建预设</button>
           </div>
         </div>
         {toast && <div className="mt-2 rounded-lg bg-emerald-50 px-3 py-1.5 text-[12px] text-emerald-700">{toast}</div>}
@@ -94,97 +189,176 @@ export function LLMSettingsPage() {
       </header>
 
       <section className="flex-1 overflow-y-auto px-5 py-5">
-        <div className="qq-card max-w-3xl px-5 py-4">
-          <div className="text-[13px] font-semibold text-slate-700">百炼 / DashScope</div>
-          <div className="mt-1 text-[11.5px] text-slate-400">值来源：<span className="qq-pill-grey">db</span>=管理页已保存 / <span className="qq-pill-grey">env</span>=服务器 .env / <span className="qq-pill-grey">default</span>=代码默认</div>
-
-          <div className="mt-4 space-y-4">
-            {FIELDS.map((f) => {
-              const cur = data?.[f.key];
-              const editVal = edits[f.key];
-              const showValue = editVal !== undefined && editVal !== null;
-              const locked = f.isSecret && cur?.is_set && !secretUnlocked[f.key] && editVal === undefined;
-              return (
-                <div key={f.key} className="border-b pb-3 last:border-0" style={{ borderColor: "#eef1f8" }}>
-                  <div className="flex items-center justify-between">
-                    <label className="text-[12.5px] font-medium text-slate-700">{f.label}</label>
-                    <div className="flex items-center gap-1.5">
-                      {cur && <span className="qq-pill-grey">{cur.source}</span>}
-                      {cur?.is_set && <span className="qq-pill-blue">已配置</span>}
-                    </div>
-                  </div>
-                  {f.hint && <div className="mt-1 text-[11px] text-slate-400">{f.hint}</div>}
-                  <div className="mt-1.5 flex items-center gap-2">
-                    {locked ? (
-                      <>
-                        <input
-                          type="text"
-                          disabled
-                          value={cur?.value || ""}
-                          className="qq-input flex-1 cursor-not-allowed bg-slate-50 font-mono text-[12px] text-slate-500"
-                        />
-                        <button className="qq-btn px-2 py-1 text-xs" onClick={() => unlockSecret(f.key)}>修改</button>
-                      </>
-                    ) : (
-                      <>
-                        <input
-                          type={f.isSecret ? "password" : "text"}
-                          placeholder={f.placeholder || ""}
-                          value={showValue ? (editVal as string) : (cur?.value || "")}
-                          onChange={(e) => setEdit(f.key, e.target.value)}
-                          className="qq-input flex-1 font-mono text-[12px]"
-                        />
-                        {cur?.is_set && editVal === undefined && (
-                          <button className="qq-btn px-2 py-1 text-xs" onClick={() => clearField(f.key)} title="清除该键回退到 env 或默认">清除</button>
-                        )}
-                        {editVal !== undefined && (
-                          <button className="qq-btn px-2 py-1 text-xs" onClick={() => {
-                            const next = { ...edits }; delete next[f.key]; setEdits(next);
-                            if (f.isSecret) setSecretUnlocked((p) => ({ ...p, [f.key]: false }));
-                          }}>取消</button>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-
-            {/* 默认 provider */}
-            <div className="pt-2">
-              <label className="text-[12.5px] font-medium text-slate-700">默认 LLM Provider</label>
-              <div className="mt-1 text-[11px] text-slate-400">前端右上角下拉的默认值；用户也可临时切换覆盖。</div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {PROVIDER_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.value}
-                    onClick={() => setEdit("LLM_PROVIDER", opt.value)}
-                    className={"qq-chip " + (draftProvider === opt.value ? "!border-blue-500 !bg-blue-50 !text-blue-700" : "")}
-                  >{opt.label}</button>
-                ))}
-                {edits.LLM_PROVIDER !== undefined && (
-                  <button className="qq-btn px-2 py-1 text-xs" onClick={() => {
-                    const next = { ...edits }; delete next.LLM_PROVIDER; setEdits(next);
-                  }}>取消改动</button>
-                )}
-              </div>
-              {data?.LLM_PROVIDER && (
-                <div className="mt-1.5 text-[11px] text-slate-400">当前生效：<span className="font-mono">{data.LLM_PROVIDER.value || "(未设置→使用代码默认)"}</span>（来源 {data.LLM_PROVIDER.source}）</div>
-              )}
-            </div>
+        {items.length === 0 ? (
+          <div className="qq-card max-w-3xl px-5 py-6 text-center text-sm text-slate-500">
+            还没有任何预设。点右上角「新建预设」开始 —— 填入百炼 AK + 模型名，测试通过即可保存。
           </div>
-        </div>
+        ) : (
+          <div className="qq-card overflow-hidden">
+            <table className="w-full text-[13px]">
+              <thead className="bg-slate-50 text-[11.5px] uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th className="px-3 py-2 text-left">名称</th>
+                  <th className="px-3 py-2 text-left">Provider</th>
+                  <th className="px-3 py-2 text-left">模型</th>
+                  <th className="px-3 py-2 text-left">AK</th>
+                  <th className="px-3 py-2 text-left">状态</th>
+                  <th className="px-3 py-2 text-left">上次测试</th>
+                  <th className="px-3 py-2 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((p) => (
+                  <tr key={p.id} className="border-t" style={{ borderColor: "#eef1f8" }}>
+                    <td className="px-3 py-2 font-medium text-slate-700">{p.name}</td>
+                    <td className="px-3 py-2"><span className="qq-pill-grey">{p.provider}</span></td>
+                    <td className="px-3 py-2 font-mono text-[12px] text-slate-700">{p.model}</td>
+                    <td className="px-3 py-2 font-mono text-[11.5px] text-slate-500">{p.api_key || "—"}</td>
+                    <td className="px-3 py-2">
+                      {p.is_default && <span className="qq-pill-blue">默认</span>}
+                      {!p.is_active && <span className="qq-pill-grey">已停用</span>}
+                    </td>
+                    <td className="px-3 py-2 text-[11.5px] text-slate-500">
+                      {p.last_tested_at ? (
+                        <span className={p.last_test_ok ? "text-emerald-600" : "text-rose-600"}>
+                          {p.last_test_ok ? "✓" : "✗"} {new Date(p.last_tested_at * 1000).toLocaleString()}
+                          <br /><span className="text-slate-400">{(p.last_test_response || "").slice(0, 80)}</span>
+                        </span>
+                      ) : <span className="text-slate-400">未测试</span>}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <div className="flex justify-end gap-1.5">
+                        <button className="qq-btn px-2 py-0.5 text-[11px]" onClick={() => testOne(p)}>测试</button>
+                        {!p.is_default && p.is_active && (
+                          <button className="qq-btn px-2 py-0.5 text-[11px]" onClick={() => setAsDefault(p)}>设为默认</button>
+                        )}
+                        <button className="qq-btn px-2 py-0.5 text-[11px]" onClick={() => openEdit(p)}>编辑</button>
+                        <button className="qq-btn px-2 py-0.5 text-[11px] hover:!border-rose-200 hover:!text-rose-600" onClick={() => remove(p)}>删除</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
 
-        <div className="qq-card mt-4 max-w-3xl px-5 py-3 text-[12px] leading-6 text-slate-600">
+        <div className="qq-card mt-4 px-5 py-3 text-[12px] leading-6 text-slate-600">
           <div className="font-medium text-slate-700">说明</div>
           <ul className="mt-1 list-disc pl-5">
-            <li>保存后<strong>立即生效</strong>，下一次 chat / 检索 调用直接读 DB 值，<strong>无需 systemctl restart</strong>。</li>
-            <li>「清除」会把 DB 行删掉，下次回退到服务器 <code>.env</code> 的同名变量；如果 .env 也没设，再回退到代码默认。</li>
-            <li>切换 chat 模型立即影响所有用户；切换 embedding 模型会让 Redis 里旧向量缓存"作废"（key 含模型名），下一次问数会触发一次冷启动 embedding，正常现象。</li>
-            <li>百炼 AK 留空 → 右上角下拉只剩飞鹤一个 provider，前端会自动隐藏下拉。</li>
+            <li>顶部右上角下拉会列出所有<strong>活跃且能用</strong>的预设（百炼 preset 必须有 AK；飞鹤要求服务器 .env 配过 AES_KEY）。</li>
+            <li>切「默认预设」= 切下一次 chat 默认走哪一套（用户右上角可临时覆盖，按 token 记忆）。</li>
+            <li>保存前的「测试连接」会真问一句"你是什么模型"，**只有非空回复才放行保存**。</li>
+            <li>编辑已有预设时，AK 默认<strong>保留旧值</strong>（不显示密文也不下发），需要换 AK 时点「修改 AK」清空再填新值。</li>
           </ul>
         </div>
       </section>
+
+      {modalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4" onClick={closeModal}>
+          <div className="qq-card w-full max-w-lg px-5 py-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <div className="text-[14px] font-semibold text-slate-800">{editing ? `编辑预设：${editing.name}` : "新建预设"}</div>
+              <button className="qq-btn px-2 py-0.5 text-xs" onClick={closeModal} disabled={saving || testing}>关闭</button>
+            </div>
+
+            <div className="mt-3 space-y-3">
+              <Field label="名称">
+                <input className="qq-input w-full" placeholder="如：百炼 qwen-plus / 飞鹤 Agent"
+                       value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+              </Field>
+
+              <Field label="Provider">
+                <div className="flex gap-2">
+                  {(["bailian", "feihe"] as const).map((v) => (
+                    <button key={v} className={"qq-chip " + (draft.provider === v ? "!border-blue-500 !bg-blue-50 !text-blue-700" : "")}
+                            onClick={() => { setDraft({ ...draft, provider: v }); setTestResult(null); }}>
+                      {v === "bailian" ? "百炼（DashScope 直连）" : "飞鹤（公司 ADP 网关）"}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+
+              {draft.provider === "bailian" && (
+                <>
+                  <Field label="API Key (sk-...)">
+                    {editing && !draft.api_key_touched ? (
+                      <div className="flex items-center gap-2">
+                        <input className="qq-input flex-1 bg-slate-50 font-mono text-[12px] text-slate-500" disabled value={editing.api_key || "(已保存，未显示)"} />
+                        <button className="qq-btn px-2 py-1 text-xs" onClick={() => setDraft({ ...draft, api_key_touched: true, api_key: "" })}>修改 AK</button>
+                      </div>
+                    ) : (
+                      <input className="qq-input w-full font-mono text-[12px]" type="password"
+                             placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                             value={draft.api_key} onChange={(e) => { setDraft({ ...draft, api_key: e.target.value, api_key_touched: true }); setTestResult(null); }} />
+                    )}
+                  </Field>
+
+                  <Field label="Base URL">
+                    <input className="qq-input w-full font-mono text-[12px]"
+                           value={draft.base_url}
+                           onChange={(e) => { setDraft({ ...draft, base_url: e.target.value }); setTestResult(null); }} />
+                  </Field>
+                </>
+              )}
+
+              <Field label="Chat 模型">
+                <input className="qq-input w-full font-mono text-[12px]"
+                       placeholder={draft.provider === "bailian" ? "qwen-plus / qwen-max / qwen3.6-max-preview" : "kaier_znws / d2b-order ..."}
+                       value={draft.model}
+                       onChange={(e) => { setDraft({ ...draft, model: e.target.value }); setTestResult(null); }} />
+              </Field>
+
+              {draft.provider === "bailian" && (
+                <Field label="Embedding 模型（可留空，默认 text-embedding-v3）">
+                  <input className="qq-input w-full font-mono text-[12px]" placeholder="text-embedding-v3"
+                         value={draft.embed_model}
+                         onChange={(e) => setDraft({ ...draft, embed_model: e.target.value })} />
+                </Field>
+              )}
+
+              {testResult && (
+                <div className={"rounded-xl border px-3 py-2 text-[12px] leading-6 " + (testResult.ok ? "border-emerald-100 bg-emerald-50 text-emerald-700" : "border-rose-100 bg-rose-50 text-rose-700")}>
+                  {testResult.ok ? (
+                    <>
+                      <div className="font-medium">✓ 测试通过 ({testResult.latency_ms} ms){testResult.model_echo ? ` · 模型回执 ${testResult.model_echo}` : ""}</div>
+                      <div className="mt-1 whitespace-pre-wrap break-words">{(testResult.text || "").slice(0, 400)}</div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="font-medium">✗ 测试失败</div>
+                      <div className="mt-1">{testResult.error}</div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-4 flex items-center justify-between border-t pt-3" style={{ borderColor: "#eef1f8" }}>
+              <div className="text-[11.5px] text-slate-400">
+                {testValid ? "✓ 测试已通过，可保存" : "请先点「测试连接」并通过"}
+              </div>
+              <div className="flex gap-2">
+                <button className="qq-btn px-3 py-1.5 text-xs" onClick={runTest} disabled={testing || saving}>
+                  {testing ? "测试中…" : "测试连接"}
+                </button>
+                <button className="qq-btn-primary px-3 py-1.5 text-xs" onClick={save} disabled={!testValid || saving}>
+                  {saving ? "保存中…" : "保存"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-[12.5px] font-medium text-slate-700">{label}</label>
+      <div className="mt-1.5">{children}</div>
     </div>
   );
 }
