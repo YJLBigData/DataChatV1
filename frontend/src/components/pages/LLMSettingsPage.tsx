@@ -25,6 +25,11 @@ const EMPTY_DRAFT: DraftPreset = {
   model: "qwen-plus", embed_model: "text-embedding-v3",
 };
 
+/** 通知 App.tsx 顶部下拉框重拉 providers —— 任何会改变下拉项的操作（新建/更新/删除/设默认）都要喊一声。 */
+function notifyProvidersChanged() {
+  try { window.dispatchEvent(new CustomEvent("datachat:llm_providers_changed")); } catch { /* SSR-safe */ }
+}
+
 export function LLMSettingsPage() {
   const [items, setItems] = useState<LLMPreset[]>([]);
   const [loading, setLoading] = useState(false);
@@ -144,6 +149,7 @@ export function LLMSettingsPage() {
       }
       setModalOpen(false);
       await refresh();
+      notifyProvidersChanged();
       setTimeout(() => setToast(null), 4000);
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -153,12 +159,12 @@ export function LLMSettingsPage() {
   }
 
   async function setAsDefault(p: LLMPreset) {
-    try { await api.adminSetDefaultLLMPreset(p.id); setToast(`已把「${p.name}」设为默认`); await refresh(); setTimeout(() => setToast(null), 3000); }
+    try { await api.adminSetDefaultLLMPreset(p.id); setToast(`已把「${p.name}」设为默认`); await refresh(); notifyProvidersChanged(); setTimeout(() => setToast(null), 3000); }
     catch (e: any) { setErr(e?.message || String(e)); }
   }
   async function remove(p: LLMPreset) {
     if (!confirm(`确定删除预设「${p.name}」？\n它将被软删除（is_active=0）。`)) return;
-    try { await api.adminDeleteLLMPreset(p.id); setToast(`已删除「${p.name}」`); await refresh(); setTimeout(() => setToast(null), 3000); }
+    try { await api.adminDeleteLLMPreset(p.id); setToast(`已删除「${p.name}」`); await refresh(); notifyProvidersChanged(); setTimeout(() => setToast(null), 3000); }
     catch (e: any) { setErr(e?.message || String(e)); }
   }
   async function testOne(p: LLMPreset) {

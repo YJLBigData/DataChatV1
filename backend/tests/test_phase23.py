@@ -290,7 +290,7 @@ def test_llm_router_picks_db_overrides(monkeypatch, tmp_path):
 
 
 def test_llm_presets_crud_and_default_flow(tmp_path, monkeypatch):
-    """多 preset：创建/更新/删除/setDefault；首条自动 default；删 default 自动顶替"""
+    """多 preset：创建/更新/删除/setDefault；新建的 preset 不再自动 default；删 default 自动顶替"""
     monkeypatch.setenv("DATACHAT_LLM_PRESETS_DB", str(tmp_path / "llm_presets.db"))
     from app.core import llm_presets as lp_mod
     lp_mod._singleton = None
@@ -300,7 +300,9 @@ def test_llm_presets_crud_and_default_flow(tmp_path, monkeypatch):
     a = s.create(name="bailian-qwen-plus", provider="bailian",
                  api_key="FAKE_AAAA1234567890", base_url="https://x/v1",
                  model="qwen-plus", embed_model="text-embedding-v3")
-    assert a.is_default is True            # 首条自动默认
+    # 业务方要求：新建 preset 不再自动 default，下拉默认始终是 legacy 飞鹤 kaier-znws
+    assert a.is_default is False
+    assert s.get_default() is None         # 没有 DB-default → router 用 legacy_feihe 兜底
 
     b = s.create(name="bailian-qwen-max", provider="bailian",
                  api_key="FAKE_BBBB1234567890", base_url="https://x/v1",
@@ -360,13 +362,15 @@ def test_router_active_preset_overrides_legacy(tmp_path, monkeypatch):
     # 没有 preset 时走 cfg 默认
     assert r._chat_model() == r.cfg.llm.bailian_chat_model
 
-    # 建一个 preset，应当优先
-    p = get_llm_presets_store().create(
+    # 建一个 preset 并显式设为默认（新建不再自动 default，需要管理员手动「设为默认」）
+    store = get_llm_presets_store()
+    p = store.create(
         name="t1", provider="bailian",
         api_key="FAKE_TESTAK_1234567890",
         base_url="https://x/v1", model="qwen-plus-from-preset",
         embed_model="text-embedding-v3",
     )
+    store.set_default(p.id)
     assert r._chat_model() == "qwen-plus-from-preset"
     assert r._api_key() == "FAKE_TESTAK_1234567890"
     assert r._base_url() == "https://x/v1"

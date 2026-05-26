@@ -101,27 +101,31 @@ export default function App() {
   const [llmChoice, setLlmChoice] = useState<string>(
     () => (typeof window !== "undefined" && localStorage.getItem(LLM_STORAGE_KEY)) || "",
   );
+
+  // 提取为可复用函数：LLM 设置页新建/编辑/删除/设默认后会触发同名事件来重拉，
+  // 让右上角下拉框无需刷新页面就能拿到最新的 preset 列表。
+  const reloadLLMProviders = useCallback(async () => {
+    try {
+      const r = await api.listLLMProviders();
+      setLlmProviders(r.available || []);
+      setLlmDefault(r.default || "");
+      setLlmChoice((cur) => {
+        const ids = (r.available || []).map((x) => x.id);
+        if (cur && ids.includes(cur)) return cur;
+        return r.default || ids[0] || "";
+      });
+    } catch {
+      /* 拉不到列表不阻塞主流程 */
+    }
+  }, []);
+
   useEffect(() => {
     if (!user) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const r = await api.listLLMProviders();
-        if (cancelled) return;
-        setLlmProviders(r.available || []);
-        setLlmDefault(r.default || "");
-        // 用户没显式选过、或本地存的 id 在服务器侧已不存在 → 用 server default
-        setLlmChoice((cur) => {
-          const ids = (r.available || []).map((x) => x.id);
-          if (cur && ids.includes(cur)) return cur;
-          return r.default || ids[0] || "";
-        });
-      } catch {
-        /* 拉不到列表不阻塞主流程；后端会用 env 默认 */
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [user]);
+    void reloadLLMProviders();
+    const onChanged = () => { void reloadLLMProviders(); };
+    window.addEventListener("datachat:llm_providers_changed", onChanged);
+    return () => window.removeEventListener("datachat:llm_providers_changed", onChanged);
+  }, [user, reloadLLMProviders]);
   useEffect(() => {
     if (llmChoice) localStorage.setItem(LLM_STORAGE_KEY, llmChoice);
   }, [llmChoice]);
@@ -404,7 +408,8 @@ export default function App() {
 
   const headerHealth = useMemo(() => {
     if (!boot) return null;
-    const hasChoices = llmProviders.length >= 2;
+    // 只要有任意一项就展示下拉框（内置两条 legacy 永远在，所以基本恒为 true）。
+    const hasChoices = llmProviders.length >= 1;
     const current = llmProviders.find((p) => p.id === llmChoice);
     return (
       <div className="flex flex-wrap items-center gap-2 text-[11px]">

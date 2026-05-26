@@ -6,6 +6,12 @@
       "runtimeExecutable": "/Users/yangjinlong/app/PythonProject/DataChatV1/backend/.venv/bin/uvicorn",
       "runtimeArgs": ["app.main:app", "--host", "127.0.0.1", "--port", "8001", "--app-dir", "/Users/yangjinlong/app/PythonProject/DataChatV1/backend"],
       "port": 8001
+    },
+    {
+      "name": "datachat-frontend",
+      "runtimeExecutable": "/Users/yangjinlong/app/PythonProject/DataChatV1/frontend/node_modules/.bin/vite",
+      "runtimeArgs": ["--config", "/Users/yangjinlong/app/PythonProject/DataChatV1/frontend/vite.config.ts", "--port", "5173"],
+      "port": 5173
     }
   ]
 }

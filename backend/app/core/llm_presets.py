@@ -156,9 +156,9 @@ class LLMPresetsStore:
         now = time.time()
         pid = uuid.uuid4().hex
         with self._lock, self._conn() as c:
-            # 首条记录自动设为默认
-            existing = c.execute("SELECT COUNT(*) FROM llm_presets WHERE is_active=1").fetchone()[0]
-            is_default = 1 if existing == 0 else 0
+            # 业务方明确要求：右上角默认始终是内置飞鹤 kaier-znws，
+            # 用户新建的 preset 不再"首条自动设为默认"——需要在 LLM 设置页手动「设为默认」才会切。
+            is_default = 0
             try:
                 c.execute(
                     "INSERT INTO llm_presets("
