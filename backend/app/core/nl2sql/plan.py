@@ -74,6 +74,10 @@ class QueryPlan:
     clarify_options: list[dict[str, Any]] = field(default_factory=list)
     confidence: float = 0.0
     reasoning: str = ""             # human-readable explanation
+    # 超范围拒答：问题落在用户数据范围（allowed_tables）之外。
+    # 与 needs_clarify 区分：澄清=还能答但要补条件；out_of_scope=明确答不了，宁拒答不硬答。
+    out_of_scope: bool = False
+    out_of_scope_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +95,8 @@ class QueryPlan:
             "clarify_options": list(self.clarify_options),
             "confidence": self.confidence,
             "reasoning": self.reasoning,
+            "out_of_scope": self.out_of_scope,
+            "out_of_scope_reason": self.out_of_scope_reason,
         }
 
     @staticmethod
@@ -190,6 +196,8 @@ class QueryPlan:
             clarify_options=clarify_options,
             confidence=_as_float(data.get("confidence"), 0.0),
             reasoning=str(data.get("reasoning") or ""),
+            out_of_scope=bool(data.get("out_of_scope")),
+            out_of_scope_reason=str(data.get("out_of_scope_reason") or ""),
         )
 
     def signature(self) -> str:
@@ -201,6 +209,7 @@ class QueryPlan:
           - confidence  ← LLM 给的置信度（每次不同）
           - reasoning   ← LLM 写的解释（每次不同）
           - needs_clarify / clarify_reason / clarify_options ← 澄清相关，不影响 SQL
+          - out_of_scope / out_of_scope_reason ← 拒答相关，不产生 SQL
 
         这样"同一道题在不同会话里第二次问"能命中 L2 plan-keyed cache。
         """

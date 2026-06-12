@@ -48,16 +48,28 @@ def should_use_direct_sql(question: str, *, min_tables: int = 3) -> bool:
     return False
 
 
-def build_schema_context(semantic_layer: Any, *, max_tables: int = 20) -> str:
+def build_schema_context(
+    semantic_layer: Any,
+    *,
+    max_tables: int = 20,
+    allowed_tables: "set[str] | frozenset[str] | None" = None,
+) -> str:
     """从语义层挤出一份"给 LLM 看"的物理表 schema。
 
     关键：暴露**物理列名**和**物理表达式**，把业务指标名作为「业务别名」描述。
     避免 LLM 把 `terminal_sale_amount_total` (语义层 metric key) 当成物理列。
+
+    allowed_tables 非 None 时按用户数据域过滤——LLM 看不到域外表，结构上
+    杜绝直接 SQL 模式引用别人的表（guard 仍按用户白名单二次校验）。
     """
     lines: list[str] = []
-    for i, t in enumerate(semantic_layer.list_tables()):
-        if i >= max_tables:
+    shown = 0
+    for t in semantic_layer.list_tables():
+        if allowed_tables is not None and t.name not in allowed_tables:
+            continue
+        if shown >= max_tables:
             break
+        shown += 1
         lines.append(f"\n物理表：`{t.schema}`.`{t.name}`（业务名：{t.label}）")
         lines.append(f"  粒度：{t.grain or '—'}")
         if t.description:
@@ -106,8 +118,9 @@ def generate_direct_sql(
     llm,
     history: Optional[list] = None,
     previous_plan: Optional[dict] = None,
+    allowed_tables: "set[str] | frozenset[str] | None" = None,
 ) -> str:
-    schema = build_schema_context(semantic_layer)
+    schema = build_schema_context(semantic_layer, allowed_tables=allowed_tables)
 
     ctx_block = ""
     if history:

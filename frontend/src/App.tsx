@@ -532,6 +532,23 @@ export default function App() {
                           turn={turn}
                           onPickSuggestion={(s) => submit(s)}
                           onPickClarify={(label) => submit(label)}
+                          onFeedback={async (vote) => {
+                            const r = turn.result;
+                            if (!r?.trace_id) return { ok: false, msg: "无结果可反馈" };
+                            const cid = r.conversation_id || activeId;
+                            if (!cid || cid === DRAFT_KEY) return { ok: false, msg: "会话未保存" };
+                            try {
+                              const res = await api.chatFeedback(cid, r.trace_id, vote);
+                              return {
+                                ok: true,
+                                msg: vote === "up"
+                                  ? (res.adopted ? "已沉淀为范例，同类问题会更准" : "已记录")
+                                  : "已记录，将用于优化",
+                              };
+                            } catch (e: any) {
+                              return { ok: false, msg: friendlyError(e) };
+                            }
+                          }}
                           onPushFeishu={async () => {
                             const r = turn.result;
                             if (!r) return { ok: false, msg: "无结果" };

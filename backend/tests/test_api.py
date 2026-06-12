@@ -323,3 +323,58 @@ def test_chat_full(client, auth_headers):
     assert body["plan"]["metric"] == "terminal_sale_amount_total"
     assert "region" in (body["plan"].get("group_by") or [])
     assert body["rows"] >= 6
+
+
+# ===================================================== 反馈闭环 + 认证清单
+
+def test_chat_feedback_adopt_flow(client, auth_headers, tmp_path, monkeypatch):
+    """采纳反馈 → few-shot 沉淀（P2 飞轮）。plan 以服务端会话存储为准。"""
+    import app.core.fewshot_store as fs_mod
+    monkeypatch.setenv("DATACHAT_FEWSHOT_DB", str(tmp_path / "fewshots.db"))
+    monkeypatch.setattr(fs_mod, "_store_singleton", None)
+
+    # 建会话 + 手工写入一问一答（绕过 LLM/MySQL）
+    r = client.post("/api/conversations", headers=auth_headers, json={"title": "t"})
+    assert r.status_code == 200
+    cid = r.json()["id"]
+
+    from app.core.conversation import get_conversation_store
+    store = get_conversation_store()
+    trace_id = "feedbacktrace123"
+    store.append_message(cid, "user", "上月各大区终端销售额", payload={})
+    store.append_message(cid, "assistant", "答案文本", payload={
+        "trace_id": trace_id,
+        "plan": {"metric": "terminal_sale_amount_total",
+                 "table": "ads_bi_month_shop_item_dan_summary_df",
+                 "group_by": ["region"], "filters": [],
+                 "time_range": {"kind": "relative", "period": "last_month"}},
+    })
+
+    r = client.post("/api/chat/feedback", headers=auth_headers,
+                    json={"conversation_id": cid, "trace_id": trace_id, "vote": "up"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("ok") and body.get("adopted") is True
+
+    hits = fs_mod.get_fewshot_store().search("上月 各大区 终端销售额", allowed_tables=None)
+    assert hits and hits[0]["intent"]["metric"] == "terminal_sale_amount_total"
+
+    # down 票：只记录不沉淀
+    r = client.post("/api/chat/feedback", headers=auth_headers,
+                    json={"conversation_id": cid, "trace_id": trace_id, "vote": "down"})
+    assert r.status_code == 200 and r.json().get("ok")
+    # trace 不存在 → 友好失败
+    r = client.post("/api/chat/feedback", headers=auth_headers,
+                    json={"conversation_id": cid, "trace_id": "nope", "vote": "up"})
+    assert r.status_code == 200 and not r.json().get("ok", True)
+
+
+def test_semantic_certification_endpoint(client, auth_headers):
+    """认证清单（只读）：三类实体 + 草稿/已认证统计。"""
+    r = client.get("/api/admin/semantic/certification", headers=auth_headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body["kinds"].keys()) == {"tables", "dimensions", "metrics"}
+    assert body["stats"]["draft"] + body["stats"]["verified"] > 0
+    for item in body["kinds"]["metrics"]:
+        assert item["status"] in ("draft", "verified")

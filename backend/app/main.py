@@ -262,6 +262,17 @@ class SemanticAnalyzeReq(BaseModel):
     sample_rows: int = 5
 
 
+class SemanticStatusReq(BaseModel):
+    status: str            # draft | verified
+
+
+class ChatFeedbackReq(BaseModel):
+    """问数答案反馈：up=采纳（沉淀为 few-shot），down=点踩（进 bad case 库）。"""
+    conversation_id: str
+    trace_id: str
+    vote: str = "up"       # up | down
+
+
 class PermissionsPutReq(BaseModel):
     """完整权限配置 — 任一字段省略 = 不变；明确传 {} 或 [] = 清空。"""
     row_rules:        Optional[dict[str, list[str]]] = None
@@ -609,6 +620,13 @@ def create_app() -> FastAPI:
 
     # ---------- per-entity CRUD ----------
 
+    # 注意：必须注册在 GET /api/admin/semantic/{kind} 之前，否则会被 {kind} 通配吞掉
+    @app.get("/api/admin/semantic/certification")
+    def api_semantic_certification(_: User = Depends(require_admin)) -> dict[str, Any]:
+        """认证清单：草稿排前面，业务负责人按清单走查（表定位/指标口径/维度值字典）。"""
+        from app.core.semantic_editor import certification_overview
+        return certification_overview(Path(cfg.app.semantic_path))
+
     @app.get("/api/admin/semantic/{kind}")
     def api_semantic_list_entities(kind: str, _: User = Depends(require_admin)) -> dict[str, Any]:
         if kind not in ("tables", "dimensions", "metrics"):
@@ -644,6 +662,21 @@ def create_app() -> FastAPI:
             try: pipe.retriever.build()
             except Exception: pass
         return {"ok": ok}
+
+    # ---------- 认证工作流（机器起草 → 人工认证） ----------
+
+    @app.post("/api/admin/semantic/{kind}/{name}/status")
+    def api_semantic_set_status(kind: str, name: str, req: SemanticStatusReq = Body(...), _: User = Depends(require_admin)) -> dict[str, Any]:
+        if kind not in ("tables", "dimensions", "metrics"):
+            raise HTTPException(status_code=404, detail="kind 仅支持 tables/dimensions/metrics")
+        from app.core.semantic_editor import set_status
+        try:
+            result = set_status(Path(cfg.app.semantic_path), kind, name, req.status)
+        except ValueError as exc:
+            return friendly_error("INPUT_INVALID", extra=str(exc))
+        # 状态在检索/拼 prompt 时实时读取，reload 即生效（无需重建向量索引）
+        get_pipe().semantic.reload()
+        return {"ok": True, **result}
 
     @app.post("/api/admin/semantic/analyze")
     def api_semantic_analyze(req: SemanticAnalyzeReq = Body(...), _: User = Depends(require_admin)) -> dict[str, Any]:
@@ -1016,6 +1049,44 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     # ============================================================ feishu
+
+    @app.post("/api/chat/feedback")
+    def api_chat_feedback(req: ChatFeedbackReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
+        """问数反馈闭环（P2 飞轮）：
+        · vote=up   → (问题, plan) 沉淀为同域 few-shot，后续同类问题作为范例注入 planner；
+        · vote=down → 记入 bad case 库（评测集挖掘素材），不参与召回。
+        plan 一律以服务端会话存储为准，不信任客户端传参。"""
+        vote = (req.vote or "up").strip().lower()
+        if vote not in ("up", "down"):
+            return friendly_error("INPUT_INVALID", extra="vote 仅支持 up/down")
+        store = get_conversation_store()
+        sess = store.get_session(req.conversation_id)
+        if not sess or sess.user_id != user.id:
+            return friendly_error("INPUT_INVALID", extra="会话不存在或无权访问")
+        msgs = store.list_messages(req.conversation_id, limit=500)
+        question, plan_dict = "", {}
+        for i, m in enumerate(msgs):
+            if m.role == "assistant" and str((m.payload or {}).get("trace_id") or "") == req.trace_id:
+                plan_dict = dict((m.payload or {}).get("plan") or {})
+                for prev in reversed(msgs[:i]):
+                    if prev.role == "user":
+                        question = prev.content
+                        break
+                break
+        if not question:
+            return friendly_error("INPUT_INVALID", extra="未找到该回答对应的提问")
+        from app.core.fewshot_store import get_fewshot_store
+        fs = get_fewshot_store()
+        if vote == "down":
+            fs.record_downvote(user.id, question, plan_dict)
+            return {"ok": True, "vote": "down"}
+        adopted = fs.add_adopted(user.id, question, plan_dict)
+        return {"ok": True, "vote": "up", "adopted": adopted}
+
+    @app.get("/api/admin/fewshots/stats")
+    def api_admin_fewshot_stats(_: User = Depends(require_admin)) -> dict[str, Any]:
+        from app.core.fewshot_store import get_fewshot_store
+        return get_fewshot_store().stats()
 
     @app.post("/api/feishu/push")
     def api_feishu_push(req: FeishuPushReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:

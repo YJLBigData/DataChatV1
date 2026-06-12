@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -171,11 +172,14 @@ class Planner:
             return False
         return True
 
-    def _explicit_metric_in_question(self, question: str):
-        """问句中是否显式点名了某个指标（按别名最长匹配）。用于判断用户是否主动换指标。"""
+    def _explicit_metric_in_question(self, question: str, allowed_tables: "set[str] | frozenset[str] | None" = None):
+        """问句中是否显式点名了某个指标（按别名最长匹配）。用于判断用户是否主动换指标。
+        allowed_tables 非 None 时只在该表范围内匹配（分域：不会"换"到域外指标上）。"""
         q = question or ""
         best = None
         for m in self.semantic.list_metrics():
+            if allowed_tables is not None and m.table not in allowed_tables:
+                continue
             for a in m.all_aliases():
                 if a and len(a) >= 2 and a in q:
                     if best is None or len(a) > best[1]:
@@ -263,6 +267,77 @@ class Planner:
                 ))
                 known_dims.add(dd.name)
 
+    # ----------------------------------------------------- scope / few-shots
+
+    def _out_of_scope_reason(
+        self,
+        question: str,
+        bundle: RetrievalBundle,
+        allowed: "frozenset[str] | None",
+        *,
+        followup: bool,
+    ) -> str:
+        """超范围判定（仅分域用户、且非多轮追问时启用）。
+
+        两级信号，宁紧勿松：
+          ① 显式点名了某个指标，但它所在的表不在用户范围内 → 精确拒答（高置信）；
+          ② 范围内检索全员低分（< DATACHAT_SCOPE_REJECT_THRESHOLD，默认 0.35，
+             0=关闭）→ 问题大概率不属于该用户的任何表 → 通用拒答。
+        返回空串 = 在范围内，正常走 planner。
+        """
+        if allowed is None or followup:
+            return ""
+        # ① 显式指标点名
+        in_scope_hit = self._explicit_metric_in_question(question, allowed_tables=allowed)
+        if in_scope_hit is None:
+            global_hit = self._explicit_metric_in_question(question)
+            if global_hit is not None:
+                return (
+                    f"您问到的「{global_hit.label}」所在的数据表不在您的数据范围内"
+                )
+        else:
+            return ""  # 显式点名了范围内指标 → 一定可答
+        # ② 检索全员低分
+        try:
+            threshold = float(os.environ.get("DATACHAT_SCOPE_REJECT_THRESHOLD", "0.35") or 0)
+        except ValueError:
+            threshold = 0.35
+        if threshold <= 0:
+            return ""
+        best = 0.0
+        for c in (*bundle.metrics, *bundle.tables, *bundle.few_shots):
+            best = max(best, float(c.score or 0.0))
+        if best < threshold:
+            return "未在您的数据范围内找到与问题匹配的指标或数据表"
+        return ""
+
+    def _merge_adopted_few_shots(
+        self,
+        bundle: RetrievalBundle,
+        question: str,
+        allowed: "frozenset[str] | None",
+    ) -> None:
+        """把"用户采纳沉淀"的同域 few-shot 合并进候选（Vanna 路线的飞轮）。
+        采纳库不可用/为空时静默跳过，绝不影响主链路。"""
+        try:
+            from app.core.fewshot_store import get_fewshot_store
+            shots = get_fewshot_store().search(question, allowed_tables=allowed, limit=3)
+        except Exception:
+            return
+        if not shots:
+            return
+        known = {c.label for c in bundle.few_shots}
+        for s in reversed(shots):  # 逆序 insert(0)，保持高分在前
+            q = str(s.get("question") or "")
+            if not q or q in known:
+                continue
+            bundle.few_shots.insert(0, RetrievalCandidate(
+                kind="few_shot", name=q[:40], label=q,
+                score=float(s.get("score") or 0.9), text=q,
+                payload={"intent": s.get("intent") or {}, "source": "adopted"},
+            ))
+            known.add(q)
+
     # -------------------------------------------------------------- main
 
     def plan(
@@ -272,9 +347,14 @@ class Planner:
         history: list[dict[str, str]] | None = None,
         previous_plan: QueryPlan | None = None,
         today: date | None = None,
+        scope: Any | None = None,   # permissions.UserScope；None = 不分域（兼容旧调用）
     ) -> PlanResult:
         started = time.perf_counter()
         followup = self._looks_like_followup(question, previous_plan)
+        # 分域：检索/显式指标匹配/表卡片只看用户自己的表集合
+        allowed: frozenset[str] | None = None
+        if scope is not None and getattr(scope, "restricted", False):
+            allowed = frozenset(scope.allowed_tables or ())
 
         # 召回查询：追问时把上一轮指标/问句拼进去，否则裸追问("把东一区按渠道拆开看")
         # 没有指标信号，会召回错指标 → 错表。
@@ -288,13 +368,28 @@ class Planner:
                     break
             search_q = " ".join(x for x in (prev_md.label if prev_md else "", prev_user, question) if x)
 
-        bundle = self.retriever.search(search_q)
+        bundle = self.retriever.search(search_q, allowed_tables=allowed)
+        self._merge_adopted_few_shots(bundle, question, allowed)
         if followup and previous_plan:
             self._augment_bundle_with_previous(bundle, previous_plan)
         rule_seed = self._extract_rule_seed(question, today=today)
 
-        # Try cache first —— key 必须含上一轮上下文 + followup，否则同一句追问在不同
-        # 上下文下会命中同一缓存（这是历史串话的根因之一）。
+        # 超范围拒答：问题落在用户表范围之外 → 不进 LLM，明确拒答（宁拒答不硬答）。
+        oos_reason = self._out_of_scope_reason(
+            question, bundle, allowed, followup=bool(followup and previous_plan),
+        )
+        if oos_reason:
+            logger.info("plan.out_of_scope user_tables=%s q=%r reason=%s",
+                        sorted(allowed or ()), question[:80], oos_reason)
+            return PlanResult(
+                plan=QueryPlan(out_of_scope=True, out_of_scope_reason=oos_reason),
+                bundle=bundle,
+                raw_llm_payload={"out_of_scope": True},
+                elapsed_ms=int((time.perf_counter() - started) * 1000),
+            )
+
+        # Try cache first —— key 必须含上一轮上下文 + followup + 数据域指纹，
+        # 否则同一句话在不同上下文/不同表范围的用户之间会命中同一缓存（历史串话根因之一）。
         cache_key = json.dumps(
             {
                 "q": question,
@@ -303,6 +398,7 @@ class Planner:
                 "rule": rule_seed,
                 "prev": (previous_plan.signature() if (previous_plan and previous_plan.metric) else ""),
                 "followup": followup,
+                "scope": getattr(scope, "fingerprint", "") if scope is not None else "",
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -317,7 +413,7 @@ class Planner:
             except Exception:
                 pass
 
-        prompt = self._build_prompt(question, bundle, history=history, previous_plan=previous_plan, rule_seed=rule_seed, today=today or date.today(), followup=followup)
+        prompt = self._build_prompt(question, bundle, history=history, previous_plan=previous_plan, rule_seed=rule_seed, today=today or date.today(), followup=followup, scope=scope)
         try:
             payload, llm_result = self.llm.chat_json(
                 [
@@ -336,6 +432,7 @@ class Planner:
         plan = self._validate_and_repair(
             plan, bundle, rule_seed, today=today or date.today(),
             previous_plan=previous_plan, followup=followup, question=question,
+            allowed_tables=allowed,
         )
 
         # Save to cache
@@ -353,6 +450,56 @@ class Planner:
 
     # ------------------------------------------------------------- prompts
 
+    def _status_mark(self, kind: str, name: str) -> str:
+        obj = self.semantic.metric(name) if kind == "metric" else self.semantic.dimension(name)
+        return "已认证" if getattr(obj, "status", "draft") == "verified" else "草稿"
+
+    def _table_cards(self, bundle: RetrievalBundle, scope: Any | None) -> tuple[str, bool]:
+        """表候选呈现（P0.5 全量呈现）。
+
+        用户数据域 ≤ DATACHAT_FULL_TABLE_CARDS_MAX（默认 20）张表时，呈现该域
+        **全部**表的语义卡片——选表从"召回命中概率题"变成"完整画面里的选择题"，
+        域外表模型根本看不到。超过阈值回退为召回 top-k 行。
+        返回 (block, 是否全量)。"""
+        try:
+            max_cards = int(os.environ.get("DATACHAT_FULL_TABLE_CARDS_MAX", "20") or 0)
+        except ValueError:
+            max_cards = 20
+        if scope is not None and getattr(scope, "restricted", False):
+            names = sorted(scope.allowed_tables or ())
+        else:
+            names = [t.name for t in self.semantic.list_tables()]
+        if max_cards <= 0 or len(names) > max_cards:
+            block = "\n".join(
+                f"- key={c.name} | label={c.label} | grain={c.payload.get('grain','')}"
+                for c in bundle.tables
+            ) or "- (无召回)"
+            return block, False
+        cards: list[str] = []
+        for name in names:
+            t = self.semantic.table(name)
+            if not t:
+                continue
+            status = "已认证" if getattr(t, "status", "draft") == "verified" else "草稿"
+            desc = " ".join((t.description or "").split())[:200]
+            metric_labels = [m.label for m in self.semantic.list_metrics() if m.table == name][:10]
+            lines = [
+                f"- key={t.name} | label={t.label} | 状态={status}",
+                f"  粒度：{t.grain or '—'}",
+            ]
+            if desc:
+                lines.append(f"  定位：{desc}")
+            if metric_labels:
+                lines.append(f"  该表指标：{'、'.join(metric_labels)}")
+            for n in (t.notes or [])[:2]:
+                n_clean = " ".join(str(n).split())[:80]
+                if n_clean:
+                    lines.append(f"  注意：{n_clean}")
+            cards.append("\n".join(lines))
+        if not cards:
+            return "- (您的数据范围内没有可用数据表)", True
+        return "\n".join(cards), True
+
     def _build_prompt(
         self,
         question: str,
@@ -363,21 +510,19 @@ class Planner:
         rule_seed: dict[str, Any],
         today: date,
         followup: bool = False,
+        scope: Any | None = None,
     ) -> dict[str, str]:
         metric_block = "\n".join(
-            f"- key={c.name} | label={c.label} | unit={c.payload.get('unit','')} | table={c.payload.get('table','')} | score={c.score:.3f}"
+            f"- key={c.name} | label={c.label} | unit={c.payload.get('unit','')} | table={c.payload.get('table','')} | 状态={self._status_mark('metric', c.name)} | score={c.score:.3f}"
             for c in bundle.metrics
         ) or "- (无召回)"
 
         dim_block = "\n".join(
-            f"- key={c.name} | label={c.label} | sample={','.join(c.payload.get('sample_values') or [])[:80]} | score={c.score:.3f}"
+            f"- key={c.name} | label={c.label} | sample={','.join(c.payload.get('sample_values') or [])[:80]} | 状态={self._status_mark('dimension', c.name)} | score={c.score:.3f}"
             for c in bundle.dimensions
         ) or "- (无召回)"
 
-        table_block = "\n".join(
-            f"- key={c.name} | label={c.label} | grain={c.payload.get('grain','')}"
-            for c in bundle.tables
-        ) or "- (无召回)"
+        table_block, full_tables = self._table_cards(bundle, scope)
 
         few_shot_block = "\n".join(
             f"- 问句: {c.label}\n  期望plan: {json.dumps(c.payload.get('intent') or {}, ensure_ascii=False)}"
@@ -403,24 +548,40 @@ class Planner:
                 "严禁因为本句没提销售口径就回退到默认销售额或最新月份——那会答错。\n"
             )
 
+        scope_rule = ""
+        if scope is not None and getattr(scope, "restricted", False):
+            scope_rule = (
+                "【数据范围】下面的候选数据表就是该用户可用的**全部**数据表，"
+                "选表/选指标必须严格出自候选集，绝不能引用清单之外的表。"
+            )
+        status_rule = (
+            "候选若标注 状态=草稿，表示其业务描述为机器起草、未经业务认证；"
+            "当草稿口径与已认证口径冲突或两者难分时，优先选已认证条目，仍无法确定则 needs_clarify。"
+        )
+
         system = (
             "你是飞鹤公司的智能问数规划器。任务：把高管的中文问题翻译为受控的 QueryPlan JSON。"
             "你不能编造任何不在候选集中的指标、维度、表。如果问题模糊（例如缺少必要维度筛选、口径冲突），"
             f"请把 needs_clarify 设为 true 并给出 clarify_options。今天是 {today.isoformat()}，"
             f"数据库覆盖范围：{self.semantic.data_range_earliest} ~ {self.semantic.data_range_latest}。"
+            f"{scope_rule}{status_rule}"
             f"{followup_rule}"
             "口径要求：1) 仅当问句明确提到『销售额』且无上一轮可继承口径时，销售额才默认 "
             "terminal_sale_amount_total；2) 涉及'达成率/目标完成'必须用 target 表的指标；"
             "3) 用户提到'同比/环比/占比/排名/趋势'必须填到 calculation 字段。"
         )
 
+        table_header = (
+            "候选数据表 tables（已是您可用的全部数据表，含语义卡片）"
+            if full_tables else "候选数据表 tables"
+        )
         user = (
             f"用户问题：{question}\n\n"
             f"历史对话（最近 4 条，可能用于多轮继承）：\n{history_block or '(无)'}\n"
             f"{prev_plan_block}\n"
             f"---\n候选指标 metrics（按相关度排序）：\n{metric_block}\n\n"
             f"候选维度 dimensions：\n{dim_block}\n\n"
-            f"候选数据表 tables：\n{table_block}\n\n"
+            f"{table_header}：\n{table_block}\n\n"
             f"参考样例 few-shots：\n{few_shot_block}\n\n"
             f"基于规则提取（时间/排名/算子）：{json.dumps(rule_seed, ensure_ascii=False)}\n\n"
             f"请只输出符合 schema 的 JSON："
@@ -583,6 +744,7 @@ class Planner:
         previous_plan: QueryPlan | None = None,
         followup: bool = False,
         question: str = "",
+        allowed_tables: "frozenset[str] | None" = None,
     ) -> QueryPlan:
         inherit = bool(followup and previous_plan and previous_plan.metric)
 
@@ -590,7 +752,8 @@ class Planner:
         #    即便 LLM/召回完全无视多轮规则，这一步也能把指标/表/时间纠回上一轮，
         #    彻底杜绝"裸追问串到别的表/月份"。
         if inherit:
-            explicit = self._explicit_metric_in_question(question)
+            # 分域：换指标只允许换到用户自己的表上，避免"换"出范围再被权限拦截
+            explicit = self._explicit_metric_in_question(question, allowed_tables=allowed_tables)
             prev_md = self.semantic.metric(previous_plan.metric)
             expl_md = self.semantic.metric(explicit.name) if explicit else None
             # 只有用户显式点了"另一张表的指标"才算主动换主题，否则一律继承上一轮
@@ -738,6 +901,10 @@ class Planner:
         else:
             plan.needs_clarify = bool(plan.needs_clarify)
 
+        # 10b. P1.5 歧义澄清（确定性，不依赖 LLM 自觉）：top-2 指标分数咬太近且
+        #      用户没显式点名 → 不硬选，抛给用户点选（点选记录又是免费标注数据）。
+        plan = self._maybe_ambiguity_clarify(plan, bundle, question, inherit)
+
         # trace：是否追问 / 继承结果 / 表是否切换及原因（便于排查"串表串口径"）
         try:
             if inherit and previous_plan:
@@ -761,6 +928,65 @@ class Planner:
         except Exception:
             pass
 
+        return plan
+
+    def _maybe_ambiguity_clarify(
+        self,
+        plan: QueryPlan,
+        bundle: RetrievalBundle,
+        question: str,
+        inherit: bool,
+    ) -> QueryPlan:
+        """P1.5：top-2 指标候选区分度不足时强制澄清。
+
+        触发条件（全部满足）：
+          · DATACHAT_AMBIGUITY_GAP > 0（默认 0.10；设 0 关闭）；
+          · 非多轮继承、planner 未主动澄清、未超范围；
+          · plan 选中的就是 top-1 或 top-2（说明模型也在两者之间摇摆）；
+          · top-1/top-2 分差 < gap 且都有正分；
+          · 问句没有显式点名所选指标的任何别名（点名 = 用户已经做过选择）。
+        """
+        try:
+            gap = float(os.environ.get("DATACHAT_AMBIGUITY_GAP", "0.10") or 0)
+        except ValueError:
+            gap = 0.10
+        if gap <= 0 or inherit or plan.needs_clarify or plan.out_of_scope:
+            return plan
+        ms = bundle.metrics
+        if len(ms) < 2:
+            return plan
+        top1, top2 = ms[0], ms[1]
+        if (
+            top1.name == top2.name
+            or plan.metric not in (top1.name, top2.name)
+            or top1.score <= 0 or top2.score <= 0
+            or (top1.score - top2.score) >= gap
+        ):
+            return plan
+        chosen = self.semantic.metric(plan.metric)
+        if chosen:
+            q = question or ""
+            for a in chosen.all_aliases():
+                if a and len(a) >= 2 and a in q:
+                    return plan
+        opts: list[dict[str, Any]] = []
+        for c in (top1, top2):
+            md = self.semantic.metric(c.name)
+            tdef = self.semantic.table(md.table) if md else None
+            hint = " · ".join(x for x in (
+                (tdef.label if tdef else (md.table if md else "")),
+                (md.unit if md else ""),
+            ) if x)
+            opts.append({"type": "metric", "key": c.name, "label": c.label, "hint": hint})
+        plan.needs_clarify = True
+        plan.clarify_reason = (
+            f"您的问题同时匹配多个相近口径（{top1.label} / {top2.label}），为避免答错请选择其一"
+        )
+        plan.clarify_options = opts
+        logger.info(
+            "plan.ambiguity_clarify q=%r top1=%s(%.3f) top2=%s(%.3f) chosen=%s",
+            (question or "")[:60], top1.name, top1.score, top2.name, top2.score, plan.metric,
+        )
         return plan
 
     def _dim_valid(self, dim_name: str, table: str) -> bool:

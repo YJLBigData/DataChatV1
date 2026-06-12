@@ -39,6 +39,62 @@ class PermissionBundle:
     def is_unrestricted(self) -> bool:
         return not self.row_rules and not self.allowed_tables and not self.allowed_columns
 
+    def fingerprint(self) -> str:
+        """权限快照指纹 — 进入 L1/q2p 缓存 key。任何权限变更（行/表/列）都让
+        该用户的问题级缓存立即失效，杜绝"权限改了，旧答案还能从缓存拿到"。"""
+        import hashlib
+        raw = json.dumps({
+            "row_rules": {k: sorted(v) for k, v in (self.row_rules or {}).items()},
+            "allowed_tables": sorted(self.allowed_tables or []),
+            "allowed_columns": {k: sorted(v) for k, v in (self.allowed_columns or {}).items()},
+            "deny_by_default": bool(self.deny_by_default),
+        }, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+@dataclass(frozen=True)
+class UserScope:
+    """一次问数请求的"数据域"快照 — 检索分域 / 全量表卡片 / guard 白名单 / 缓存 key 共用。
+
+    allowed_tables 语义：
+      · None      = 不分域（admin，或该用户未配置表白名单）→ 全语义层可见；
+      · frozenset = 该用户可用的物理表集合（已与语义层求交）。空集合合法：
+                    配置的表全部不在语义层 → 检索零召回 → 超范围拒答。
+    fingerprint 覆盖完整权限快照（含行级/列级），供 L1/q2p 缓存 key 使用。
+    """
+    user_id: str
+    is_admin: bool = False
+    allowed_tables: frozenset[str] | None = None
+    fingerprint: str = "all"
+
+    @property
+    def restricted(self) -> bool:
+        return self.allowed_tables is not None
+
+
+def get_user_scope(user_id: str, *, is_admin: bool, semantic_layer: Any | None = None) -> UserScope:
+    """构建用户数据域。失败时返回不分域 scope（检索照旧全量），
+    强制性的权限拦截仍由 apply_to_plan / validate_sql_columns 兜底（fail closed）。"""
+    if is_admin:
+        return UserScope(user_id=user_id, is_admin=True)
+    try:
+        bundle = get_permissions_store().get_for_user(user_id)
+    except Exception as exc:
+        logger.warning("get_user_scope: permissions store unavailable (%s) — fallback to unscoped", exc)
+        return UserScope(user_id=user_id)
+    if not bundle.allowed_tables:
+        # 未配表白名单：不分域（生产环境 deny_by_default 仍会在 apply_to_plan 拦截）
+        return UserScope(user_id=user_id, fingerprint=bundle.fingerprint())
+    tables = set(bundle.allowed_tables)
+    if semantic_layer is not None:
+        known = set(getattr(semantic_layer, "tables", {}) or {})
+        tables &= known
+    return UserScope(
+        user_id=user_id,
+        allowed_tables=frozenset(tables),
+        fingerprint=bundle.fingerprint(),
+    )
+
 
 class PermissionsStore:
     """SQLite-backed.   新版表结构（向前兼容旧 permissions 表，自动迁移）：

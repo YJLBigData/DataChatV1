@@ -1,0 +1,79 @@
+cases:
+- question: 本月销售额是多少
+  expected_metric: terminal_sale_amount_total
+  expected_table: ads_bi_month_shop_item_dan_summary_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots
+- question: 各大区销售额排名
+  expected_metric: terminal_sale_amount_total
+  expected_table: ads_bi_month_shop_item_dan_summary_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots
+- question: 东一区 1 季度销售情况
+  expected_metric: terminal_sale_amount_total
+  expected_table: ads_bi_month_shop_item_dan_summary_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots
+- question: 1 段产品的销售情况
+  expected_metric: terminal_sale_amount_total
+  expected_table: ads_bi_month_shop_item_dan_summary_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots
+- question: 销售目标完成的怎么样
+  expected_metric: shop_sale_achievement_rate
+  expected_table: ads_bi_month_shop_item_dan_target_summary_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots
+- question: 各大区销售同比情况
+  expected_metric: terminal_sale_amount_total
+  expected_table: ads_bi_month_shop_item_dan_summary_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots
+- question: 这个月新客人数是多少
+  expected_metric: first_purchase_num_total
+  expected_table: ads_member_first_purchase_new_customer_total_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots
+- question: 各大区 60 天复购率
+  expected_metric: repurchase_rate_60d
+  expected_table: ads_member_first_purchase_new_customer_total_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots
+- question: 卓睿系列卖得怎么样
+  expected_metric: terminal_sale_amount_total
+  expected_table: ads_bi_month_shop_item_dan_summary_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots
+- question: 终端销售排名前 5 的城市
+  expected_metric: terminal_sale_amount_total
+  expected_table: ads_bi_month_shop_item_dan_summary_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots
+- question: 各大区终端销售金额和还原过单金额差异多少？差异最大的前 10 个大区
+  expected_metric: terminal_sale_amount_total
+  expected_table: ads_bi_month_shop_item_dan_summary_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots
+- question: 销售额前 10 的门店
+  expected_metric: terminal_sale_amount_total
+  expected_table: ads_bi_month_shop_item_dan_summary_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots
+- question: 河南省销售额按城市拆分
+  expected_metric: terminal_sale_amount_total
+  expected_table: ads_bi_month_shop_item_dan_summary_df
+  allowed_tables: []
+  user_id: ''
+  note: seed:semantic.few_shots

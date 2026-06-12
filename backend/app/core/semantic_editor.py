@@ -83,6 +83,12 @@ def _validate_entity(kind: str, name: str, body: dict[str, Any], data: dict[str,
         # 允许指向"本次同批新增"的表；否则必须是已存在表
         if known_tables and tbl not in known_tables:
             raise ValueError(f"指标 {name} 的 table='{tbl}' 不在 tables 中，请先创建该表")
+    # 认证状态：只接受 draft / verified（缺省按 draft 处理，不在这里强写）
+    if "status" in body:
+        st = str(body.get("status") or "").strip().lower()
+        if st not in ("draft", "verified"):
+            raise ValueError(f"{kind}.{name} 的 status 只能是 draft 或 verified，收到 {body.get('status')!r}")
+        body["status"] = st
 
 
 def upsert_entity(path: Path, kind: str, name: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -94,9 +100,46 @@ def upsert_entity(path: Path, kind: str, name: str, body: dict[str, Any]) -> dic
         raise ValueError("body 必须是对象")
     data = _load_yaml(path)
     _validate_entity(kind, name, body, data)
+    # 认证状态保持策略：body 未显式给 status 时，沿用已有条目的状态；
+    # 全新条目默认 draft（机器起草未经认证）。显式给 status 以显式值为准。
+    if "status" not in body:
+        existing = (data.get(kind) or {}).get(name) or {}
+        body["status"] = str(existing.get("status") or "draft").strip().lower() or "draft"
     data.setdefault(kind, {})[name] = body
     _save_yaml(path, data)
     return body
+
+
+def set_status(path: Path, kind: str, name: str, status: str) -> dict[str, Any]:
+    """认证工作流：单独切换某实体的 draft/verified 状态（不动其它字段）。"""
+    if kind not in ("tables", "dimensions", "metrics"):
+        raise ValueError(f"unknown kind: {kind}")
+    st = str(status or "").strip().lower()
+    if st not in ("draft", "verified"):
+        raise ValueError(f"status 只能是 draft 或 verified，收到 {status!r}")
+    data = _load_yaml(path)
+    section = data.get(kind) or {}
+    if name not in section:
+        raise ValueError(f"{kind} 中不存在 {name}")
+    section[name]["status"] = st
+    _save_yaml(path, data)
+    return {"kind": kind, "name": name, "status": st}
+
+
+def certification_overview(path: Path) -> dict[str, Any]:
+    """认证清单：每类实体的 (name, label, status)，给管理端"集中认证"用。"""
+    data = _load_yaml(path)
+    out: dict[str, Any] = {"kinds": {}, "stats": {"draft": 0, "verified": 0}}
+    for kind in ("tables", "dimensions", "metrics"):
+        items = []
+        for name, body in (data.get(kind) or {}).items():
+            st = str((body or {}).get("status") or "draft").strip().lower()
+            st = st if st == "verified" else "draft"
+            items.append({"name": name, "label": str((body or {}).get("label") or name), "status": st})
+            out["stats"][st] += 1
+        items.sort(key=lambda x: (x["status"] != "draft", x["name"]))  # 草稿排前面，方便走查
+        out["kinds"][kind] = items
+    return out
 
 
 def delete_entity(path: Path, kind: str, name: str) -> bool:

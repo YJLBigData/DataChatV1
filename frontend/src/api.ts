@@ -205,6 +205,23 @@ export const api = {
       body: JSON.stringify({ table }),
     }),
 
+  /* ---------- 语义认证工作流（机器起草 → 人工认证） ---------- */
+  semanticCertification: () =>
+    jsonReq<{ kinds: Record<string, { name: string; label: string; status: "draft" | "verified" }[]>;
+              stats: { draft: number; verified: number } }>("/api/admin/semantic/certification"),
+  semanticSetStatus: (kind: "tables"|"dimensions"|"metrics", name: string, status: "draft"|"verified") =>
+    jsonReq<{ ok: boolean }>(`/api/admin/semantic/${kind}/${encodeURIComponent(name)}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status }),
+    }),
+
+  /* ---------- 问数反馈（采纳→few-shot 飞轮；点踩→bad case 库） ---------- */
+  chatFeedback: (conversation_id: string, trace_id: string, vote: "up" | "down") =>
+    jsonReq<{ ok: boolean; adopted?: boolean }>("/api/chat/feedback", {
+      method: "POST",
+      body: JSON.stringify({ conversation_id, trace_id, vote }),
+    }),
+
   /* ---------- 报告模板（per-user） ---------- */
   listReportTemplates: (owner?: string) => {
     const qs = owner ? `?owner=${encodeURIComponent(owner)}` : "";

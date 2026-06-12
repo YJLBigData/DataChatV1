@@ -1,0 +1,156 @@
+{
+  "mode": "retrieval",
+  "total": 13,
+  "answered": 13,
+  "clarify": 0,
+  "out_of_scope": 0,
+  "table_acc": 0.6923,
+  "metric_acc": 0.6154,
+  "metric_top3_acc": 0.6923,
+  "cases": [
+    {
+      "question": "本月销售额是多少",
+      "outcome": "answered",
+      "expected_metric": "terminal_sale_amount_total",
+      "pred_metric": "terminal_sale_amount_total",
+      "metric_ok": true,
+      "expected_table": "ads_bi_month_shop_item_dan_summary_df",
+      "pred_table": "ads_bi_month_shop_item_dan_summary_df",
+      "table_ok": true,
+      "metric_top3": true
+    },
+    {
+      "question": "各大区销售额排名",
+      "outcome": "answered",
+      "expected_metric": "terminal_sale_amount_total",
+      "pred_metric": "terminal_sale_amount_total",
+      "metric_ok": true,
+      "expected_table": "ads_bi_month_shop_item_dan_summary_df",
+      "pred_table": "ads_bi_month_shop_item_dan_summary_df",
+      "table_ok": true,
+      "metric_top3": true
+    },
+    {
+      "question": "东一区 1 季度销售情况",
+      "outcome": "answered",
+      "expected_metric": "terminal_sale_amount_total",
+      "pred_metric": "shop_sale_amount_total",
+      "metric_ok": false,
+      "expected_table": "ads_bi_month_shop_item_dan_summary_df",
+      "pred_table": "ads_bi_hs_sale_info_df",
+      "table_ok": false,
+      "metric_top3": false
+    },
+    {
+      "question": "1 段产品的销售情况",
+      "outcome": "answered",
+      "expected_metric": "terminal_sale_amount_total",
+      "pred_metric": "shop_sale_amount_total",
+      "metric_ok": false,
+      "expected_table": "ads_bi_month_shop_item_dan_summary_df",
+      "pred_table": "ads_bi_hs_sale_info_df",
+      "table_ok": false,
+      "metric_top3": false
+    },
+    {
+      "question": "销售目标完成的怎么样",
+      "outcome": "answered",
+      "expected_metric": "shop_sale_achievement_rate",
+      "pred_metric": "shop_sale_achievement_rate",
+      "metric_ok": true,
+      "expected_table": "ads_bi_month_shop_item_dan_target_summary_df",
+      "pred_table": "ads_bi_month_shop_item_dan_target_summary_df",
+      "table_ok": true,
+      "metric_top3": true
+    },
+    {
+      "question": "各大区销售同比情况",
+      "outcome": "answered",
+      "expected_metric": "terminal_sale_amount_total",
+      "pred_metric": "terminal_sale_amount_total",
+      "metric_ok": true,
+      "expected_table": "ads_bi_month_shop_item_dan_summary_df",
+      "pred_table": "ads_bi_month_shop_item_dan_summary_df",
+      "table_ok": true,
+      "metric_top3": true
+    },
+    {
+      "question": "这个月新客人数是多少",
+      "outcome": "answered",
+      "expected_metric": "first_purchase_num_total",
+      "pred_metric": "potential_to_new_num_total",
+      "metric_ok": false,
+      "expected_table": "ads_member_first_purchase_new_customer_total_df",
+      "pred_table": "ads_precision_nutrition_potential_total_df",
+      "table_ok": false,
+      "metric_top3": false
+    },
+    {
+      "question": "各大区 60 天复购率",
+      "outcome": "answered",
+      "expected_metric": "repurchase_rate_60d",
+      "pred_metric": "repurchase_rate_60d",
+      "metric_ok": true,
+      "expected_table": "ads_member_first_purchase_new_customer_total_df",
+      "pred_table": "ads_member_first_purchase_new_customer_total_df",
+      "table_ok": true,
+      "metric_top3": true
+    },
+    {
+      "question": "卓睿系列卖得怎么样",
+      "outcome": "answered",
+      "expected_metric": "terminal_sale_amount_total",
+      "pred_metric": "terminal_sale_amount_total",
+      "metric_ok": true,
+      "expected_table": "ads_bi_month_shop_item_dan_summary_df",
+      "pred_table": "ads_bi_month_shop_item_dan_summary_df",
+      "table_ok": true,
+      "metric_top3": true
+    },
+    {
+      "question": "终端销售排名前 5 的城市",
+      "outcome": "answered",
+      "expected_metric": "terminal_sale_amount_total",
+      "pred_metric": "terminal_sale_amount_total",
+      "metric_ok": true,
+      "expected_table": "ads_bi_month_shop_item_dan_summary_df",
+      "pred_table": "ads_bi_month_shop_item_dan_summary_df",
+      "table_ok": true,
+      "metric_top3": true
+    },
+    {
+      "question": "各大区终端销售金额和还原过单金额差异多少？差异最大的前 10 个大区",
+      "outcome": "answered",
+      "expected_metric": "terminal_sale_amount_total",
+      "pred_metric": "reduction_gd_sale_amount_total",
+      "metric_ok": false,
+      "expected_table": "ads_bi_month_shop_item_dan_summary_df",
+      "pred_table": "ads_bi_month_shop_item_dan_summary_df",
+      "table_ok": true,
+      "metric_top3": true
+    },
+    {
+      "question": "销售额前 10 的门店",
+      "outcome": "answered",
+      "expected_metric": "terminal_sale_amount_total",
+      "pred_metric": "shop_sale_amount_total",
+      "metric_ok": false,
+      "expected_table": "ads_bi_month_shop_item_dan_summary_df",
+      "pred_table": "ads_bi_hs_sale_info_df",
+      "table_ok": false,
+      "metric_top3": false
+    },
+    {
+      "question": "河南省销售额按城市拆分",
+      "outcome": "answered",
+      "expected_metric": "terminal_sale_amount_total",
+      "pred_metric": "terminal_sale_amount_total",
+      "metric_ok": true,
+      "expected_table": "ads_bi_month_shop_item_dan_summary_df",
+      "pred_table": "ads_bi_month_shop_item_dan_summary_df",
+      "table_ok": true,
+      "metric_top3": true
+    }
+  ],
+  "ts": 1781245658.836276
+}

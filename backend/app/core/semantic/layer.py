@@ -17,6 +17,12 @@ import yaml
 logger = logging.getLogger("datachat.semantic")
 
 
+def _norm_status(value: Any) -> str:
+    """认证状态归一化：只有显式 verified 算已认证，其余（含缺省/手误）一律 draft。
+    draft = 机器起草未经人工确认，planner 提示词里会标注出来。"""
+    return "verified" if str(value or "").strip().lower() == "verified" else "draft"
+
+
 @dataclass
 class TableDef:
     name: str
@@ -31,6 +37,7 @@ class TableDef:
     primary_dimensions: list[str]
     measures: list[str]
     notes: list[str]
+    status: str = "draft"          # draft | verified（人工认证）
 
     @property
     def full_name(self) -> str:
@@ -50,6 +57,7 @@ class DimensionDef:
     value_dict: dict[str, str] = field(default_factory=dict)
     description: str = ""
     code_columns: dict[str, str] = field(default_factory=dict)
+    status: str = "draft"          # draft | verified（人工认证）
 
     def column_in(self, table: str) -> str | None:
         return self.table_columns.get(table)
@@ -74,6 +82,7 @@ class MetricDef:
     domain: str = "general"
     typical_dimensions: list[str] = field(default_factory=list)
     typical_questions: list[str] = field(default_factory=list)
+    status: str = "draft"          # draft | verified（人工认证）
 
     def all_aliases(self) -> list[str]:
         return [a for a in {self.label, self.name, *self.aliases} if a]
@@ -296,6 +305,7 @@ class SemanticLayer:
                 primary_dimensions=list(body.get("primary_dimensions") or []),
                 measures=list(body.get("measures") or []),
                 notes=list(body.get("notes") or []),
+                status=_norm_status(body.get("status")),
             )
 
     def _load_dimensions(self, raw: dict[str, Any]) -> None:
@@ -310,6 +320,7 @@ class SemanticLayer:
                 value_dict={str(k): str(v) for k, v in (body.get("value_dict") or {}).items()},
                 description=str(body.get("description") or "").strip(),
                 code_columns={str(k): str(v) for k, v in (body.get("code_column") or {}).items()},
+                status=_norm_status(body.get("status")),
             )
 
     def _load_metrics(self, raw: dict[str, Any]) -> None:
@@ -329,6 +340,7 @@ class SemanticLayer:
                 domain=str(body.get("domain") or "general"),
                 typical_dimensions=list(body.get("typical_dimensions") or []),
                 typical_questions=list(body.get("typical_questions") or []),
+                status=_norm_status(body.get("status")),
             )
 
     def _load_joins(self, raw: dict[str, Any]) -> None:

@@ -82,6 +82,23 @@ export function SemanticPage() {
     } catch (e: any) { alert("删除失败：" + (e?.message || e)); }
   }
 
+  /** 认证工作流：草稿 ⇄ 已认证。已认证条目在问数提示词里有更高优先级。 */
+  async function toggleStatus(kind: Kind, name: string, cur: string) {
+    const next = cur === "verified" ? "draft" : "verified";
+    try {
+      await api.semanticSetStatus(kind, name, next);
+      await refresh();
+    } catch (e: any) { alert("状态更新失败：" + (e?.message || e)); }
+  }
+
+  const certStats = useMemo(() => {
+    let v = 0, total = 0;
+    for (const rec of [tables, dims, metrics]) {
+      for (const b of Object.values(rec)) { total++; if ((b as any)?.status === "verified") v++; }
+    }
+    return { v, total };
+  }, [tables, dims, metrics]);
+
   if (loading) return <div className="px-6 py-12 text-center text-sm text-slate-400">加载语义层…</div>;
 
   return (
@@ -89,7 +106,13 @@ export function SemanticPage() {
       <div className="flex items-end justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-slate-800">知识库 / 语义层</h2>
-          <p className="text-xs text-slate-400">业务术语、指标、维度、表的统一语义建模。修改后保存即重建检索索引。</p>
+          <p className="text-xs text-slate-400">
+            业务术语、指标、维度、表的统一语义建模。修改后保存即重建检索索引。
+            <span className={`ml-2 rounded-full px-2 py-0.5 text-[11px] ${certStats.v === certStats.total ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600"}`}
+              title="机器起草的条目默认为草稿；业务确认口径后点状态列认证。已认证口径在问数时优先采用。">
+              认证进度 {certStats.v}/{certStats.total}
+            </span>
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setAnalyzeOpen(true)} className="rounded-xl border bg-white px-3 py-1.5 text-xs text-slate-600 hover:border-blue-200 hover:text-blue-600" style={{borderColor:"#e6ecf6"}}>
@@ -119,9 +142,9 @@ export function SemanticPage() {
       <div className="qq-card overflow-hidden">
         <table className="qq-table">
           <thead>
-            {tab === "tables" && <tr><th>表名</th><th>标签</th><th>粒度</th><th>描述</th><th className="w-32">操作</th></tr>}
-            {tab === "dimensions" && <tr><th>维度名</th><th>标签</th><th>覆盖表</th><th>样例值</th><th className="w-32">操作</th></tr>}
-            {tab === "metrics" && <tr><th>指标名</th><th>标签</th><th>表达式</th><th>表</th><th className="w-32">操作</th></tr>}
+            {tab === "tables" && <tr><th>表名</th><th>标签</th><th>粒度</th><th>描述</th><th className="w-24">状态</th><th className="w-32">操作</th></tr>}
+            {tab === "dimensions" && <tr><th>维度名</th><th>标签</th><th>覆盖表</th><th>样例值</th><th className="w-24">状态</th><th className="w-32">操作</th></tr>}
+            {tab === "metrics" && <tr><th>指标名</th><th>标签</th><th>表达式</th><th>表</th><th className="w-24">状态</th><th className="w-32">操作</th></tr>}
           </thead>
           <tbody>
             {filtered.map(([name, body]) => (
@@ -143,13 +166,26 @@ export function SemanticPage() {
                   <td className="text-slate-500">{(body as any).table || "—"}</td>
                 </>}
                 <td>
+                  <button
+                    onClick={()=>toggleStatus(tab as Kind, name, (body as any).status || "draft")}
+                    title="点击切换：草稿 ⇄ 已认证（业务确认口径后再认证）"
+                    className={`rounded-full px-2 py-0.5 text-[11px] ${
+                      (body as any).status === "verified"
+                        ? "bg-emerald-50 text-emerald-600 hover:bg-emerald-100"
+                        : "bg-amber-50 text-amber-600 hover:bg-amber-100"
+                    }`}
+                  >
+                    {(body as any).status === "verified" ? "✓ 已认证" : "草稿"}
+                  </button>
+                </td>
+                <td>
                   <button onClick={()=>setEdit({ kind: tab as Kind, name, body, isNew: false })} className="mr-2 text-xs text-blue-600 hover:underline">编辑</button>
                   <button onClick={()=>deleteEntity(tab as Kind, name)} className="text-xs text-rose-600 hover:underline">删除</button>
                 </td>
               </tr>
             ))}
             {filtered.length === 0 && (
-              <tr><td colSpan={5} className="px-3 py-8 text-center text-xs text-slate-400">无匹配条目</td></tr>
+              <tr><td colSpan={6} className="px-3 py-8 text-center text-xs text-slate-400">无匹配条目</td></tr>
             )}
           </tbody>
         </table>

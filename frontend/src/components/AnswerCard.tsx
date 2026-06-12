@@ -17,6 +17,8 @@ interface Props {
   onPushFeishu: () => Promise<{ ok: boolean; msg: string }>;
   onDownloadReport: () => Promise<{ ok: boolean; msg: string }>;
   onCopySql: () => void;
+  /** 答案反馈：up=采纳（沉淀为同域 few-shot 范例），down=不准（进 bad case 库） */
+  onFeedback?: (vote: "up" | "down") => Promise<{ ok: boolean; msg: string }>;
 }
 
 /**
@@ -25,7 +27,7 @@ interface Props {
  *   - 中部：图表中心（默认列表，可切换 13 种图表，灰色 = 不支持）
  *   - 底部：口径详情、SQL、操作（复制 SQL / 推送飞书 / 下载 DOCX）+ 推荐追问
  */
-export function AnswerCard({ turn, onPickSuggestion, onPickClarify, onPushFeishu, onDownloadReport, onCopySql }: Props) {
+export function AnswerCard({ turn, onPickSuggestion, onPickClarify, onPushFeishu, onDownloadReport, onCopySql, onFeedback }: Props) {
   const result = turn.result;
   const answer = result?.answer;
 
@@ -34,6 +36,8 @@ export function AnswerCard({ turn, onPickSuggestion, onPickClarify, onPushFeishu
   const [showDetail, setShowDetail] = useState(false);
   const [pushState, setPushState] = useState<{ msg: string; ok: boolean } | null>(null);
   const [reportState, setReportState] = useState<{ msg: string; ok: boolean } | null>(null);
+  const [voted, setVoted] = useState<"up" | "down" | "">("");
+  const [voteMsg, setVoteMsg] = useState("");
 
   const modes = useMemo(
     () => detectChartModes(answer?.table as any, answer?.chart),
@@ -178,6 +182,35 @@ export function AnswerCard({ turn, onPickSuggestion, onPickClarify, onPushFeishu
           )}
 
           <div className="ml-auto flex items-center gap-1.5">
+            {onFeedback && (
+              <>
+                {voteMsg ? <span className="text-[11px] text-slate-400">{voteMsg}</span> : null}
+                <button
+                  className={`qq-btn px-2 py-1 text-xs ${voted === "up" ? "!bg-emerald-50 !text-emerald-600" : ""}`}
+                  disabled={voted !== ""}
+                  title="答案准确 — 沉淀为范例，下次同类问题更准"
+                  onClick={async () => {
+                    const r = await onFeedback("up");
+                    if (r.ok) { setVoted("up"); setVoteMsg(r.msg); setTimeout(() => setVoteMsg(""), 4000); }
+                    else { setVoteMsg(r.msg); setTimeout(() => setVoteMsg(""), 4000); }
+                  }}
+                >
+                  {voted === "up" ? "已采纳 ✓" : "👍 采纳"}
+                </button>
+                <button
+                  className={`qq-btn px-2 py-1 text-xs ${voted === "down" ? "!bg-rose-50 !text-rose-600" : ""}`}
+                  disabled={voted !== ""}
+                  title="答案不准 — 记录为待修正案例"
+                  onClick={async () => {
+                    const r = await onFeedback("down");
+                    if (r.ok) { setVoted("down"); setVoteMsg(r.msg); setTimeout(() => setVoteMsg(""), 4000); }
+                    else { setVoteMsg(r.msg); setTimeout(() => setVoteMsg(""), 4000); }
+                  }}
+                >
+                  {voted === "down" ? "已反馈" : "👎 不准"}
+                </button>
+              </>
+            )}
             <button className="qq-btn px-2 py-1 text-xs" onClick={() => onCopySql()} title="复制 SQL">
               复制 SQL
             </button>

@@ -131,10 +131,22 @@ class Pipeline:
             emit("input", "error", {"reason": "empty"}, 0)
             return PipelineResult(trace_id=trace_id, question="", answer={"narrative": "请输入问题。"}, plan={}, sql="", rows=0, elapsed_ms=0, cached=False, events=[e.to_dict() for e in events])
 
-        # Stage 1: L1 cache  —  (question, user_id, ctx_fp) 精确匹配
-        ctx_fp = ""
+        # Stage 0.5: 用户数据域（检索分域 / guard 白名单 / 缓存 key 三处共用）。
+        # 构建失败不阻断主链路：检索退回全量，强制拦截仍由 Stage 3.6 + guard fail-closed 兜底。
+        from app.core.permissions import get_user_scope
+        try:
+            scope = get_user_scope(user_id, is_admin=is_admin, semantic_layer=self.semantic)
+        except Exception as exc:
+            logger.warning("user scope build failed (%s) — fallback to unscoped", exc)
+            scope = None
+        scope_fp = getattr(scope, "fingerprint", "all") if scope is not None else "all"
+
+        # Stage 1: L1 cache  —  (question, user_id, ctx_fp) 精确匹配。
+        # ctx_fp 拼入权限指纹：权限一变（行/表/列任何一项），该用户的问题级缓存立即失效，
+        # 不会在 TTL 内继续吐出旧权限下算出的答案。
+        ctx_fp = scope_fp
         if previous_plan and previous_plan.metric:
-            ctx_fp = previous_plan.signature()
+            ctx_fp = f"{scope_fp}|{previous_plan.signature()}"
         cached_payload = None
         if not force_refresh:
             cached_payload = self.cache.get_question(question_clean, user_id, ctx_fp)
@@ -163,7 +175,8 @@ class Pipeline:
         # + answerer LLM (~120s)，整条请求 < 200ms 返回。
         # 上下文真变了？没事——这里只是预判，下面 planner 跑完后会再校验一次 plan_sig，
         # 校验不过就放弃这条加速、走完整流程。
-        q2p_key = self.cache._k("q2p", _fingerprint(question_clean, user_id)) if hasattr(self.cache, "_k") else None
+        # key 含权限指纹：权限变更后旧 q2p 索引整体失效（防止越过 planner 拿到旧权限答案）。
+        q2p_key = self.cache._k("q2p", _fingerprint(question_clean, user_id, scope_fp)) if hasattr(self.cache, "_k") else None
         prefetched_plan_sig = None
         if q2p_key and not force_refresh:
             try:
@@ -200,15 +213,15 @@ class Pipeline:
                     question_clean,
                     user_id=user_id, is_admin=is_admin,
                     run_started=run_started, trace_id=trace_id, events=events, emit=emit,
-                    history=history, previous_plan=previous_plan,
+                    history=history, previous_plan=previous_plan, scope=scope,
                 )
         except Exception as exc:
             logger.warning("direct_sql route check failed: %s — falling back to planner", exc)
 
-        # Stage 2 + 3: retrieval + plan (planner internally calls retriever)
+        # Stage 2 + 3: retrieval + plan (planner internally calls retriever; 按 scope 分域)
         plan_started = time.perf_counter()
         try:
-            plan_result = self.planner.plan(question_clean, history=history, previous_plan=previous_plan)
+            plan_result = self.planner.plan(question_clean, history=history, previous_plan=previous_plan, scope=scope)
         except LLMError as exc:
             emit("plan", "error", {"reason": str(exc)}, int((time.perf_counter() - plan_started) * 1000))
             return PipelineResult(
@@ -242,37 +255,54 @@ class Pipeline:
 
         plan = plan_result.plan
 
-        # Stage 3.2: L2 plan-keyed cache 二次检查
-        # 即使 q2p 没命中（首次新问题 / 索引失效 / 上下文真的变了），只要 planner 这次产出的
-        # plan 在以前的请求里出现过（任何用户 / 任何会话）→ 直接复用历史完整答案。
-        # 一次 planner LLM 的代价已经付了，但能跳过 compile/execute/answerer LLM（120s+）。
-        plan_sig_now = plan.signature() if plan.metric else ""
-        if plan_sig_now and not force_refresh:
-            plan_cached = None
-            try:
-                plan_cached = self.cache.get_plan(plan_sig_now)
-            except Exception:
-                plan_cached = None
-            if plan_cached:
-                emit("cache", "hit", {"layer": "L2 (plan)", "plan_sig": plan_sig_now[:12]}, 0)
-                # 写回 q2p 索引（即使首次 miss，这次帮下次秒返）
-                if q2p_key:
-                    try:
-                        self.cache.set(q2p_key, plan_sig_now, ttl=self.cache.cfg.ttl_question if hasattr(self.cache, "cfg") else 3600)
-                    except Exception:
-                        pass
-                elapsed = int((time.perf_counter() - run_started) * 1000)
-                return PipelineResult(
-                    trace_id=trace_id,
-                    question=question_clean,
-                    answer=plan_cached.get("answer") or {},
-                    plan=plan_cached.get("plan") or plan.to_dict(),
-                    sql=plan_cached.get("sql") or "",
-                    rows=int(plan_cached.get("rows") or 0),
-                    elapsed_ms=elapsed,
-                    cached=True,
-                    events=[e.to_dict() for e in events],
-                )
+        # Stage 3.3: 超范围拒答 —— 问题落在该用户的表范围之外，明确拒答 + 告知范围。
+        # 管住准确率的分母：宁拒答不硬答；拒答文案附用户范围与可问示例，引导改问。
+        if plan.out_of_scope:
+            allowed_sorted = sorted(scope.allowed_tables) if (scope is not None and getattr(scope, "restricted", False)) else []
+            table_labels = []
+            for t in allowed_sorted:
+                tdef = self.semantic.table(t)
+                table_labels.append(tdef.label if tdef else t)
+            suggestions: list[str] = []
+            for m in self.semantic.list_metrics():
+                if len(suggestions) >= 3:
+                    break
+                if m.table in allowed_sorted and m.typical_questions:
+                    q0 = str(m.typical_questions[0]).strip()
+                    if q0 and q0 not in suggestions:
+                        suggestions.append(q0)
+            scope_desc = "、".join(table_labels[:15]) if table_labels else "（暂未配置任何数据表）"
+            narrative = (
+                f"{plan.out_of_scope_reason or '这个问题超出了您的数据范围'}。"
+                f"您当前可查询的数据范围：{scope_desc}"
+                + (f"（共 {len(table_labels)} 张表）" if table_labels else "")
+                + "。如需扩大范围请联系管理员。"
+            )
+            emit("scope", "rejected", {"reason": plan.out_of_scope_reason, "tables": len(table_labels)}, 0)
+            elapsed = int((time.perf_counter() - run_started) * 1000)
+            return PipelineResult(
+                trace_id=trace_id,
+                question=question_clean,
+                answer={
+                    "narrative": narrative,
+                    "highlights": [],
+                    "risk_notes": [],
+                    "table": {"columns": [], "rows": [], "display_columns": [], "display_rows": [], "row_count": 0, "elapsed_ms": 0},
+                    "chart": {"type": "none"},
+                    "suggestions": suggestions,
+                    "explainability": {
+                        "rule": "超出数据范围时明确拒答（宁拒答不硬答）",
+                        "reason": plan.out_of_scope_reason,
+                        "allowed_tables": allowed_sorted,
+                    },
+                },
+                plan=plan.to_dict(),
+                sql="",
+                rows=0,
+                elapsed_ms=elapsed,
+                cached=False,
+                events=[e.to_dict() for e in events],
+            )
 
         # Stage 3.5: clarify shortcut
         if plan.needs_clarify:
@@ -314,6 +344,42 @@ class Pipeline:
         except Exception as exc:
             logger.warning("permissions inject failed: %s", exc)
 
+        # Stage 3.7: L2 plan-keyed cache（原 3.2，刻意移到权限注入之后）。
+        #
+        # 修复（P0 串数据 bug）：旧实现在 Stage 3.6 之前计算签名并直接命中返回，
+        # 而 set_plan 存的是注入行级权限之后算出的完整答案 → 行级权限不同的两个用户
+        # 问同一句话会得到相同的"无权限"签名，互相命中对方的数字（错数 + 越权）。
+        # 现在签名在 apply_to_plan 之后计算：signature() 本就包含 filters，行级权限
+        # 不同 → filters 不同 → 签名天然分开；权限相同的用户（含全部无限制用户）
+        # 仍然共享缓存，性能不受影响。
+        plan_sig_now = plan.signature() if plan.metric else ""
+        if plan_sig_now and not force_refresh:
+            plan_cached = None
+            try:
+                plan_cached = self.cache.get_plan(plan_sig_now)
+            except Exception:
+                plan_cached = None
+            if plan_cached:
+                emit("cache", "hit", {"layer": "L2 (plan)", "plan_sig": plan_sig_now[:12]}, 0)
+                # 写回 q2p 索引（即使首次 miss，这次帮下次秒返）
+                if q2p_key:
+                    try:
+                        self.cache.set(q2p_key, plan_sig_now, ttl=self.cache.cfg.ttl_question if hasattr(self.cache, "cfg") else 3600)
+                    except Exception:
+                        pass
+                elapsed = int((time.perf_counter() - run_started) * 1000)
+                return PipelineResult(
+                    trace_id=trace_id,
+                    question=question_clean,
+                    answer=plan_cached.get("answer") or {},
+                    plan=plan_cached.get("plan") or plan.to_dict(),
+                    sql=plan_cached.get("sql") or "",
+                    rows=int(plan_cached.get("rows") or 0),
+                    elapsed_ms=elapsed,
+                    cached=True,
+                    events=[e.to_dict() for e in events],
+                )
+
         # Stage 4: compile
         compile_started = time.perf_counter()
         try:
@@ -335,9 +401,14 @@ class Pipeline:
             )
         emit("compile", "ok", {"sql_preview": raw_sql[:200]}, int((time.perf_counter() - compile_started) * 1000))
 
-        # Stage 5: guard
+        # Stage 5: guard（分域用户按本人表白名单校验，未分域走全语义层白名单）
+        scope_whitelist = (
+            scope.allowed_tables
+            if (scope is not None and getattr(scope, "restricted", False))
+            else None
+        )
         try:
-            report = self.guard.validate(raw_sql)
+            report = self.guard.validate(raw_sql, allowed_tables=scope_whitelist)
         except GuardError as exc:
             emit("guard", "error", {"reason": str(exc)}, 0)
             return PipelineResult(
@@ -469,12 +540,20 @@ class Pipeline:
     def _run_direct_sql(self, question: str, *, user_id: str, is_admin: bool,
                         run_started: float, trace_id: str, events: list, emit,
                         history: list[dict[str, str]] | None = None,
-                        previous_plan: QueryPlan | None = None) -> PipelineResult:
-        """Direct-SQL：LLM 直接生成 SQL → guard → 权限注入 → 执行 → 总结。"""
+                        previous_plan: QueryPlan | None = None,
+                        scope: Any | None = None) -> PipelineResult:
+        """Direct-SQL：LLM 直接生成 SQL → guard → 权限注入 → 执行 → 总结。
+        分域用户：schema 上下文只含本人的表（LLM 看不到域外表），guard 按本人白名单校验。"""
         from app.core.direct_sql import generate_direct_sql, summarize_direct_result
         from app.core.guard import GuardError
         from app.core.permissions import (
             PermissionDenied, inject_row_filters_into_sql, validate_sql_columns,
+        )
+
+        scope_whitelist = (
+            scope.allowed_tables
+            if (scope is not None and getattr(scope, "restricted", False))
+            else None
         )
 
         # 1) 生成 SQL
@@ -483,6 +562,7 @@ class Pipeline:
             sql = generate_direct_sql(
                 question, semantic_layer=self.semantic, llm=self.llm,
                 history=history, previous_plan=previous_plan.to_dict() if previous_plan else None,
+                allowed_tables=scope_whitelist,
             )
         except Exception as exc:
             emit("direct_sql", "llm_error", {"reason": str(exc)[:200]}, int((time.perf_counter() - gen_started) * 1000))
@@ -495,9 +575,9 @@ class Pipeline:
                                         "未生成有效 SQL，请稍后再试或换一种问法。")
         emit("direct_sql", "generated", {"sql_preview": sql[:200]}, int((time.perf_counter() - gen_started) * 1000))
 
-        # 2) AST guard（表白名单 + 只 SELECT + 自动 LIMIT）
+        # 2) AST guard（表白名单按用户分域 + 只 SELECT + 自动 LIMIT）
         try:
-            report = self.guard.validate(sql)
+            report = self.guard.validate(sql, allowed_tables=scope_whitelist)
             guarded_sql = report.sanitized_sql
         except GuardError as exc:
             emit("direct_sql", "guard_blocked", {"reason": str(exc)}, 0)

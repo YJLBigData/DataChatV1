@@ -276,27 +276,87 @@ class HybridRetriever:
 
     # -------------------------------------------------------------- search
 
-    def search(self, query: str, *, top_k_per_kind: int | None = None) -> RetrievalBundle:
+    def _doc_in_scope(self, doc: dict[str, Any], allowed: set[str]) -> bool:
+        """候选是否落在用户的表范围内（检索分域）。
+
+        · table     → 表名直接判定；
+        · metric    → 指标绑定的表（payload.table，缺失则查语义层）；
+        · dimension → 维度的 table_columns 与范围有交集即可（同名维度跨表存在）；
+        · few_shot  → intent 里声明的 table（或 metric 推导的表）；无表信息的保留。
+        判定一律"宁紧勿松"：指标/表绑定信息缺失视为不在范围（避免域外候选漏进 prompt）。
+        """
+        kind = doc.get("kind") or ""
+        name = doc.get("name") or ""
+        if kind == "table":
+            return name in allowed
+        if kind == "metric":
+            table = (doc.get("payload") or {}).get("table") or ""
+            if not table:
+                md = self.semantic.metric(name)
+                table = md.table if md else ""
+            return bool(table) and table in allowed
+        if kind == "dimension":
+            dd = self.semantic.dimension(name)
+            if not dd:
+                return True  # 语义层查不到（极端情况），不因分域误杀
+            return any(t in allowed for t in dd.table_columns.keys())
+        if kind == "few_shot":
+            intent = (doc.get("payload") or {}).get("intent") or {}
+            table = str(intent.get("table") or "")
+            if not table:
+                md = self.semantic.metric(str(intent.get("metric") or ""))
+                table = md.table if md else ""
+            return (table in allowed) if table else True
+        return True
+
+    def _status_of(self, doc: dict[str, Any]) -> str:
+        """实时取认证状态（不进索引：状态变更立即生效，无需重建/重嵌入）。"""
+        kind = doc.get("kind") or ""
+        name = doc.get("name") or ""
+        obj = None
+        if kind == "metric":
+            obj = self.semantic.metric(name)
+        elif kind == "dimension":
+            obj = self.semantic.dimension(name)
+        elif kind == "table":
+            obj = self.semantic.table(name)
+        return getattr(obj, "status", "draft") if obj is not None else "draft"
+
+    def search(
+        self,
+        query: str,
+        *,
+        top_k_per_kind: int | None = None,
+        allowed_tables: "set[str] | frozenset[str] | None" = None,
+    ) -> RetrievalBundle:
+        """allowed_tables=None → 不分域（全量候选）；非 None → 只召回该表范围内的候选。
+        空集合是合法输入（用户配置的表全部不在语义层）→ 召回为空 → 上游走超范围拒答。"""
         if not self._built:
             self.build()
         started = time.perf_counter()
         top_k = int(top_k_per_kind or 6)
+        allowed = set(allowed_tables) if allowed_tables is not None else None
 
         bm25_scores = self._bm25_scores(query)
         emb_scores = self._embedding_scores(query)
         boost = self._alias_boost(query)
 
-        # combine
+        # combine（已认证条目微幅加权：同分时优先人工确认过的口径）
         combined: list[float] = []
         for i, doc in enumerate(self._docs):
             bm = bm25_scores[i] if i < len(bm25_scores) else 0.0
             em = emb_scores[i] if i < len(emb_scores) else 0.0
             bo = boost.get(i, 0.0)
-            combined.append(0.45 * bm + 0.55 * em + bo)
+            score = 0.45 * bm + 0.55 * em + bo
+            if score > 0 and self._status_of(doc) == "verified":
+                score += 0.05
+            combined.append(score)
 
-        # group by kind
+        # group by kind（分域：范围外的候选直接不进入分组）
         grouped: dict[str, list[tuple[int, float]]] = defaultdict(list)
         for i, score in enumerate(combined):
+            if allowed is not None and not self._doc_in_scope(self._docs[i], allowed):
+                continue
             grouped[self._docs[i]["kind"]].append((i, score))
 
         def take(kind: str) -> list[RetrievalCandidate]:

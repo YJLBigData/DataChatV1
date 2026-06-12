@@ -58,7 +58,9 @@ class SQLGuard:
     def _multi_table_allowed() -> bool:
         return (os.environ.get("DATACHAT_ALLOW_MULTI_TABLE") or "0").strip().lower() in ("1", "true", "yes", "on")
 
-    def validate(self, sql: str) -> GuardReport:
+    def validate(self, sql: str, *, allowed_tables: Iterable[str] | None = None) -> GuardReport:
+        """allowed_tables 传入时覆盖实例级白名单（按用户分域：每个用户只放行
+        自己的表集合）；不传保持旧行为（全语义层白名单）。"""
         if not sql or not sql.strip():
             raise GuardError("空 SQL")
         cleaned = sql.strip().rstrip(";").strip()
@@ -71,8 +73,12 @@ class SQLGuard:
         if self.cfg.block_select_star and re.search(r"select\s+\*\s+from", cleaned, re.IGNORECASE):
             raise GuardError("禁止 SELECT *，请显式列出字段")
 
+        whitelist = (
+            {t.lower() for t in allowed_tables} if allowed_tables is not None
+            else self.allowed_tables
+        )
         tables = self._extract_tables(cleaned)
-        unknown = [t for t in tables if t.lower() not in self.allowed_tables]
+        unknown = [t for t in tables if t.lower() not in whitelist]
         if unknown:
             raise GuardError(f"包含未授权表：{unknown}")
 
