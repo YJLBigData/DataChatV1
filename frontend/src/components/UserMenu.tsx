@@ -41,16 +41,6 @@ export function UserMenu({ user, onChangePassword, onLogout }: Props) {
           className="absolute right-0 top-10 z-30 w-44 overflow-hidden rounded-xl border bg-white py-1 shadow-lg"
           style={{ borderColor: "#eef1f8" }}
         >
-          {/* DataCode 入口：同域 /datacode/，使用 DataChat 登录态自动 SSO 进入。 */}
-          <a
-            className="block w-full px-3 py-2 text-left text-xs text-blue-700 hover:bg-blue-50"
-            href="/datacode/"
-            target="_blank"
-            rel="noreferrer"
-            onClick={() => setOpen(false)}
-          >
-            打开 DataCode（写代码）
-          </a>
           <button
             className="block w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"
             onClick={() => { setOpen(false); onChangePassword(); }}
