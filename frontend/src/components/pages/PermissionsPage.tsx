@@ -102,7 +102,7 @@ export function PermissionsPage() {
     <div className="mx-auto max-w-6xl space-y-4 px-6 py-6">
       <PageHeader
         title="数据权限管理"
-        desc="三层校验：行级（维度值白名单）+ 表级 + 字段级。管理员不受限。未配置时默认开放，可按用户启用 deny by default。"
+        desc="三层校验：行级（维度值白名单）+ 表级 + 字段级。管理员不受限。未配置规则时：本地/开发默认开放、生产环境默认拒绝（需显式授权）；也可对单用户启用 deny by default 强制拒绝。"
       />
 
       <div className="qq-card overflow-hidden">

@@ -21,6 +21,9 @@ export function SemanticPage() {
   const [edit, setEdit] = useState<{ kind: Kind; name: string; body: any; isNew: boolean } | null>(null);
   const [yamlEdit, setYamlEdit] = useState<{ content: string; path: string } | null>(null);
   const [analyzeOpen, setAnalyzeOpen] = useState(false);
+  // #15：保存前校验结果 + 历史版本（用于回滚）
+  const [yamlCheck, setYamlCheck] = useState<{ ok: boolean; errors: string[]; summary: Record<string, number> } | null>(null);
+  const [versions, setVersions] = useState<{ id: string; bytes: number; mtime: number }[]>([]);
 
   async function refresh() {
     setLoading(true);
@@ -55,15 +58,41 @@ export function SemanticPage() {
   async function loadYaml() {
     const r = await api.semanticGet();
     setYamlEdit({ content: r.content, path: r.path });
+    setYamlCheck(null);
+    try { setVersions((await api.semanticVersions()).items || []); } catch { setVersions([]); }
+  }
+  async function validateYaml() {
+    if (!yamlEdit) return;
+    try { setYamlCheck(await api.semanticValidate(yamlEdit.content)); }
+    catch (e: any) { setYamlCheck({ ok: false, errors: [e?.message || String(e)], summary: {} }); }
   }
   async function saveYaml() {
     if (!yamlEdit) return;
+    // #15：保存前先 dry-run 校验，不通过则阻止保存并展示错误（不再"保存即热重载"）。
+    const check = await api.semanticValidate(yamlEdit.content).catch(() => null);
+    if (check && !check.ok) { setYamlCheck(check); return; }
     try {
       const r = await api.semanticPut(yamlEdit.content);
       alert(`已保存\n指标 ${r.metrics} · 维度 ${r.dimensions} · 表 ${r.tables}`);
       setYamlEdit(null);
       await refresh();
     } catch (e: any) { alert("保存失败：" + (e?.message || e)); }
+  }
+  async function rollbackTo(vid: string) {
+    if (!confirm(`回滚到版本 ${vid}？\n当前内容会先自动快照，可再回滚回来。`)) return;
+    try {
+      const r = await api.semanticRollback(vid);
+      alert(`已回滚\n指标 ${r.metrics} · 维度 ${r.dimensions} · 表 ${r.tables}`);
+      setYamlEdit(null);
+      await refresh();
+    } catch (e: any) { alert("回滚失败：" + (e?.message || e)); }
+  }
+  async function loadVersionIntoEditor(vid: string) {
+    try {
+      const r = await api.semanticVersionContent(vid);
+      setYamlEdit((cur) => (cur ? { ...cur, content: r.content } : cur));
+      setYamlCheck(null);
+    } catch (e: any) { alert("载入失败：" + (e?.message || e)); }
   }
 
   async function saveEntity() {
@@ -238,13 +267,47 @@ export function SemanticPage() {
           <div className="mb-2 text-xs text-slate-400">{yamlEdit.path}</div>
           <textarea
             value={yamlEdit.content}
-            onChange={(e)=>setYamlEdit({...yamlEdit, content: e.target.value})}
+            onChange={(e)=>{ setYamlEdit({...yamlEdit, content: e.target.value}); setYamlCheck(null); }}
             spellCheck={false}
             className="w-full rounded-lg border bg-white px-3 py-2 font-mono text-[11px]"
-            style={{borderColor:"#e6ecf6", minHeight: 460, resize: "vertical"}}
+            style={{borderColor:"#e6ecf6", minHeight: 360, resize: "vertical"}}
           />
+
+          {/* #15：校验结果 */}
+          {yamlCheck && (
+            <div className={`mt-2 rounded-lg px-3 py-2 text-[11px] ${yamlCheck.ok ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
+              {yamlCheck.ok ? (
+                <span>✓ 校验通过 —— 表 {yamlCheck.summary.tables ?? 0} · 指标 {yamlCheck.summary.metrics ?? 0} · 维度 {yamlCheck.summary.dimensions ?? 0}</span>
+              ) : (
+                <div>
+                  <div className="font-semibold">✗ 校验未通过：</div>
+                  <ul className="mt-0.5 list-disc pl-4">{yamlCheck.errors.map((er, i) => <li key={i}>{er}</li>)}</ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* #15：历史版本（回滚 / 载入对比） */}
+          {versions.length > 0 && (
+            <details className="mt-2 rounded-lg border px-3 py-2 text-[11px]" style={{borderColor:"#e6ecf6"}}>
+              <summary className="cursor-pointer text-slate-600">历史版本（{versions.length}）—— 保存/回滚前会自动快照</summary>
+              <div className="mt-2 max-h-[160px] space-y-1 overflow-auto">
+                {versions.map((v) => (
+                  <div key={v.id} className="flex items-center justify-between gap-2 rounded bg-slate-50 px-2 py-1">
+                    <span className="font-mono text-[10.5px] text-slate-500">{new Date(v.mtime * 1000).toLocaleString()} · {(v.bytes/1024).toFixed(1)}KB</span>
+                    <span className="flex gap-2">
+                      <button onClick={()=>loadVersionIntoEditor(v.id)} className="text-blue-600 hover:underline">载入对比</button>
+                      <button onClick={()=>rollbackTo(v.id)} className="text-amber-600 hover:underline">回滚</button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+
           <div className="mt-3 flex justify-end gap-2">
             <button onClick={()=>setYamlEdit(null)} className="rounded-xl border px-3 py-1.5 text-xs" style={{borderColor:"#e6ecf6"}}>取消</button>
+            <button onClick={validateYaml} className="rounded-xl border px-3 py-1.5 text-xs text-slate-600 hover:border-blue-200 hover:text-blue-600" style={{borderColor:"#e6ecf6"}}>校验</button>
             <button onClick={saveYaml} className="qq-btn-primary !px-4 !py-1.5 text-xs">保存并热重载</button>
           </div>
         </Modal>

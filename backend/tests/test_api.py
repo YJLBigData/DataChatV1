@@ -20,12 +20,16 @@ os.environ["APP_ENV"] = "test"
 os.environ.pop("USER_DIRECTORY", None)
 os.environ.pop("DB_USERS_ENABLED", None)
 os.environ["DATACHAT_AUTH_DB"] = "/tmp/datachat_test_auth.db"
+os.environ["DATACHAT_CONV_DB"] = "/tmp/datachat_test_conv.db"
 os.environ["JWT_SECRET"] = "test-secret"
 os.environ["DATACHAT_ADMIN_PASSWORD"] = "test-admin-pwd"
 Path("/tmp/datachat_test_auth.db").unlink(missing_ok=True)
+Path("/tmp/datachat_test_conv.db").unlink(missing_ok=True)
 # Reset any auth singleton possibly created by previous tests so our env wins
 from app.core import auth as _auth_mod  # noqa: E402
 _auth_mod._store_singleton = None
+from app.core import conversation as _conv_mod  # noqa: E402
+_conv_mod._default_store = None
 
 
 @pytest.fixture(scope="module")
@@ -42,6 +46,28 @@ def auth_headers(client):
     assert r.status_code == 200, r.text
     token = r.json()["token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+def _seed_trusted_answer(client, headers, *, narrative="可信结论", highlights=None,
+                         rows=None, trace_id="tracetest123", question="本月各大区销售额"):
+    """创建会话并塞入一条带 trace_id 的 assistant 消息，返回 (conversation_id, trace_id)。
+
+    用于验证报告 / 飞书一律以服务端落地结果为准，不信任前端 payload（P0）。
+    """
+    me = client.get("/api/me", headers=headers).json()
+    from app.core.conversation import get_conversation_store
+    store = get_conversation_store()
+    sess = store.create_session(me["id"], title="t")
+    store.append_message(sess.id, "user", question, payload={})
+    store.append_message(sess.id, "assistant", narrative, payload={
+        "answer": {
+            "narrative": narrative,
+            "highlights": highlights if highlights is not None else ["要点A"],
+            "table": {"display_rows": rows if rows is not None else [["华东", "100"]]},
+        },
+        "plan": {"metric": "sales"}, "sql": "SELECT 1", "trace_id": trace_id,
+    })
+    return sess.id, trace_id
 
 
 def test_root_health(client):
@@ -263,6 +289,23 @@ def test_chat_requires_auth(client):
     assert r.status_code == 401
 
 
+def test_metrics_access_control_logic():
+    """P1：/metrics 本地放开；生产仅 localhost/内网/带 METRICS_TOKEN。"""
+    from app.main import _metrics_access_allowed as allow, _ip_is_local_or_private as priv
+    # 本地放开
+    assert allow(is_local=True, client_ip="8.8.8.8", auth_header="", token="")
+    # 生产：公网 IP 拒绝
+    assert not allow(is_local=False, client_ip="8.8.8.8", auth_header="", token="t")
+    # 生产：localhost / 内网放行
+    assert allow(is_local=False, client_ip="127.0.0.1", auth_header="", token="")
+    assert allow(is_local=False, client_ip="10.1.2.3", auth_header="", token="")
+    # 生产：带正确 token 放行；错误 token 拒绝
+    assert allow(is_local=False, client_ip="8.8.8.8", auth_header="Bearer s3cret", token="s3cret")
+    assert not allow(is_local=False, client_ip="8.8.8.8", auth_header="Bearer wrong", token="s3cret")
+    assert priv("192.168.0.5") and priv("::1")
+    assert not priv("8.8.8.8") and not priv("testclient")
+
+
 def test_feishu_push_failure_returns_ok_false(client, auth_headers, monkeypatch):
     """P1-2：飞书推送失败时后端返回 HTTP 200 + ok:false + user_message，
     不回传底层异常文本（前端据此不得显示“已推送”）。"""
@@ -272,14 +315,155 @@ def test_feishu_push_failure_returns_ok_false(client, auth_headers, monkeypatch)
         raise main_mod.FeishuError("internal webhook 10.0.0.1 connection refused")
 
     monkeypatch.setattr(main_mod, "feishu_push", boom)
+    cid, tid = _seed_trusted_answer(client, auth_headers)
     r = client.post("/api/feishu/push", headers=auth_headers,
-                     json={"title": "t", "narrative": "n", "highlights": [], "rows_preview": []})
+                     json={"conversation_id": cid, "trace_id": tid, "user_email": "ops@feihe.com"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["ok"] is False
     assert body["error_code"] == "FEISHU_PUSH_FAILED"
     assert body["user_message"] and "connection refused" not in body["user_message"]
     assert "10.0.0.1" not in str(body)
+
+
+def test_feishu_push_uses_server_side_trusted_content(client, auth_headers, monkeypatch):
+    """P0：推送内容必须来自服务端会话存储（按 trace 取），不信任前端伪造的
+    narrative/highlights/rows_preview，并返回内容指纹 content_sha256。"""
+    import app.main as main_mod
+    captured: dict = {}
+
+    def capture(title, narrative, highlights, rows_preview, **k):
+        captured.update(title=title, narrative=narrative, highlights=highlights, rows_preview=rows_preview)
+        return {"ok": True}
+
+    monkeypatch.setattr(main_mod, "feishu_push", capture)
+    cid, tid = _seed_trusted_answer(
+        client, auth_headers, narrative="真实结论", highlights=["真要点"], rows=[["华东", "999"]],
+    )
+    r = client.post("/api/feishu/push", headers=auth_headers,
+                     json={"conversation_id": cid, "trace_id": tid, "user_email": "ops@feihe.com"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True and body.get("content_sha256")
+    # 内容取自服务端可信结果（哪怕前端不传也照样填充）
+    assert captured["narrative"] == "真实结论"
+    assert captured["highlights"] == ["真要点"]
+    assert captured["rows_preview"] == ["华东 | 999"]
+
+
+def test_feishu_push_rejects_unknown_trace(client, auth_headers):
+    """P0：trace_id 不存在 / 不属于该用户 → 404，无法伪造推送。"""
+    cid, _ = _seed_trusted_answer(client, auth_headers)
+    r = client.post("/api/feishu/push", headers=auth_headers,
+                     json={"conversation_id": cid, "trace_id": "doesnotexist", "user_email": "ops@feihe.com"})
+    assert r.status_code == 404, r.text
+
+
+def test_report_uses_server_side_trusted_content(client, auth_headers, monkeypatch, tmp_path):
+    """P0：报告 question/answer/plan/sql 必须来自服务端会话存储，不信任前端 payload。"""
+    import app.main as main_mod
+    captured: dict = {}
+
+    def fake_generate(question, answer, plan, sql, **k):
+        captured.update(question=question, answer=answer, plan=plan, sql=sql)
+        p = tmp_path / "r.docx"
+        p.write_bytes(b"PK\x03\x04stub")
+        return p
+
+    monkeypatch.setattr(main_mod, "generate_report", fake_generate)
+    cid, tid = _seed_trusted_answer(client, auth_headers, narrative="可信报告结论")
+    r = client.post("/api/report/generate", headers=auth_headers,
+                    json={"conversation_id": cid, "trace_id": tid})
+    assert r.status_code == 200, r.text
+    assert captured["question"] == "本月各大区销售额"
+    assert captured["answer"]["narrative"] == "可信报告结论"
+    assert captured["sql"] == "SELECT 1"
+
+
+def test_report_rejects_unknown_trace(client, auth_headers):
+    """P0：报告生成同样要求可信 trace，伪造 payload 无法生成报告。"""
+    cid, _ = _seed_trusted_answer(client, auth_headers)
+    r = client.post("/api/report/generate", headers=auth_headers,
+                    json={"conversation_id": cid, "trace_id": "nope"})
+    assert r.status_code == 404, r.text
+
+
+def test_stream_blocks_must_change_password(client, auth_headers):
+    """P0：未改初始密码的用户不能用 SSE 流式问数（与 /api/chat 一致 403），
+    不能绕过 must_change_password 拦截。"""
+    uname = "p0streamtest"
+    created = client.post("/api/admin/users", headers=auth_headers,
+                          json={"username": uname, "must_change_password": True}).json()
+    otp = created["one_time_password"]
+    tok = client.post("/api/login", json={"username": uname, "password": otp}).json()["token"]
+    h = {"Authorization": f"Bearer {tok}"}
+    # /api/chat 应 403
+    assert client.post("/api/chat", headers=h, json={"question": "hi"}).status_code == 403
+    # /api/chat/stream 也必须 403（修复前可绕过），header 与 query token 两种形式都拦
+    assert client.post("/api/chat/stream", headers=h, json={"question": "hi"}).status_code == 403
+    assert client.post(f"/api/chat/stream?token={tok}", json={"question": "hi"}).status_code == 403
+
+
+def test_password_change_revokes_old_token(client, auth_headers):
+    """P1-7：改密后旧 token 立即失效（401），必须用新密码重新登录。"""
+    import time as _t
+    uname = "p1revoke"
+    pwd1 = "OldPass123"
+    client.post("/api/admin/users", headers=auth_headers,
+                json={"username": uname, "password": pwd1, "must_change_password": False})
+    tok1 = client.post("/api/login", json={"username": uname, "password": pwd1}).json()["token"]
+    h1 = {"Authorization": f"Bearer {tok1}"}
+    assert client.get("/api/me", headers=h1).status_code == 200      # 旧 token 可用
+    # JWT iat 为整秒，sleep 跨秒保证 token.iat < password_changed_at
+    _t.sleep(1.1)
+    r = client.post("/api/me/password", headers=h1,
+                    json={"old_password": pwd1, "new_password": "NewPass456"})
+    assert r.status_code == 200, r.text
+    assert client.get("/api/me", headers=h1).status_code == 401      # 旧 token 立即失效
+    tok2 = client.post("/api/login", json={"username": uname, "password": "NewPass456"}).json()["token"]
+    assert client.get("/api/me", headers={"Authorization": f"Bearer {tok2}"}).status_code == 200
+
+
+def test_user_active_disable_blocks_login_and_token(client, auth_headers):
+    """P1-10：停用账号后无法登录、已签发 token 立即失效；重新启用后恢复。"""
+    uname = "p1active"
+    pwd = "ActivePass1"
+    client.post("/api/admin/users", headers=auth_headers,
+                json={"username": uname, "password": pwd, "must_change_password": False})
+    tok = client.post("/api/login", json={"username": uname, "password": pwd}).json()["token"]
+    h = {"Authorization": f"Bearer {tok}"}
+    assert client.get("/api/me", headers=h).status_code == 200
+    # 停用
+    r = client.post(f"/api/admin/users/{uname}/active", headers=auth_headers, json={"is_active": False})
+    assert r.status_code == 200, r.text
+    assert client.get("/api/me", headers=h).status_code == 401                 # 旧 token 立即失效
+    assert client.post("/api/login", json={"username": uname, "password": pwd}).status_code == 401  # 无法登录
+    users = client.get("/api/admin/users", headers=auth_headers).json()["items"]
+    assert next(u for u in users if u["username"] == uname)["is_active"] is False
+    # 重新启用 → 可登录
+    client.post(f"/api/admin/users/{uname}/active", headers=auth_headers, json={"is_active": True})
+    assert client.post("/api/login", json={"username": uname, "password": pwd}).status_code == 200
+
+
+def test_cannot_disable_logged_in_admin(client, auth_headers):
+    """P1-10：默认 / 当前登录管理员不可被停用（防自锁）。"""
+    r = client.post("/api/admin/users/admin/active", headers=auth_headers, json={"is_active": False})
+    assert r.status_code == 400
+
+
+def test_semantic_validate_endpoint(client, auth_headers):
+    """#15：semantic 全文保存前 dry-run 校验，不落盘；需要管理员。"""
+    bad = client.post("/api/admin/semantic/validate", headers=auth_headers, json={"content": "tables: ["})
+    assert bad.status_code == 200 and bad.json()["ok"] is False
+    miss = client.post("/api/admin/semantic/validate", headers=auth_headers, json={"content": "tables: {}\nmetrics: {}"})
+    assert miss.json()["ok"] is False
+    good = "tables:\n  t1: {}\nmetrics:\n  m1: {}\ndimensions:\n  d1: {}\n"
+    ok = client.post("/api/admin/semantic/validate", headers=auth_headers, json={"content": good})
+    assert ok.json()["ok"] is True and ok.json()["summary"]["tables"] == 1
+    # 未登录拒绝
+    assert client.post("/api/admin/semantic/validate", json={"content": good}).status_code == 401
+    # 版本列表端点可访问（不被 {kind} 通配吞掉）
+    assert client.get("/api/admin/semantic/versions", headers=auth_headers).status_code == 200
 
 
 def test_chat_pipeline_failure_returns_ok_false(client, auth_headers, monkeypatch):

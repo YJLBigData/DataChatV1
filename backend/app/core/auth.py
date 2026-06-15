@@ -112,6 +112,9 @@ class User:
     created_at: float
     email: str = ""
     must_change_password: bool = False
+    # 改密时刻（epoch 秒）。token 的 iat < 该值 → token 已失效（改密吊销旧 token）。
+    password_changed_at: float = 0.0
+    is_active: bool = True   # 停用账号（is_active=0）禁止登录、已签发 token 立即失效
 
 
 class AuthError(RuntimeError):
@@ -146,7 +149,9 @@ class AuthStore:
                     role TEXT NOT NULL,
                     created_at REAL NOT NULL,
                     email TEXT DEFAULT '',
-                    must_change_password INTEGER DEFAULT 0
+                    must_change_password INTEGER DEFAULT 0,
+                    password_changed_at REAL DEFAULT 0,
+                    is_active INTEGER DEFAULT 1
                 );
                 """
             )
@@ -156,6 +161,10 @@ class AuthStore:
                 c.execute("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''")
             if "must_change_password" not in cols:
                 c.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
+            if "password_changed_at" not in cols:
+                c.execute("ALTER TABLE users ADD COLUMN password_changed_at REAL DEFAULT 0")
+            if "is_active" not in cols:
+                c.execute("ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1")
 
     def _secure_db_files(self) -> None:
         for suffix in ("", "-wal", "-shm"):
@@ -228,18 +237,21 @@ class AuthStore:
         h = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=10)).decode("utf-8")
         with self._lock, self._conn() as c:
             c.execute(
-                "INSERT INTO users(id, username, password_hash, role, created_at, email, must_change_password) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (uid, username, h, role, now, email or "", 1 if must_change_password else 0),
+                "INSERT INTO users(id, username, password_hash, role, created_at, email, must_change_password, password_changed_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (uid, username, h, role, now, email or "", 1 if must_change_password else 0, now),
             )
         return User(id=uid, username=username, role=role, created_at=now,
-                    email=email or "", must_change_password=must_change_password)
+                    email=email or "", must_change_password=must_change_password,
+                    password_changed_at=now)
 
     def list_users(self) -> list[User]:
         with self._lock, self._conn() as c:
             rows = c.execute(
                 "SELECT id, username, role, created_at, COALESCE(email,'') AS email, "
-                "COALESCE(must_change_password,0) AS must_change_password FROM users ORDER BY created_at ASC"
+                "COALESCE(must_change_password,0) AS must_change_password, "
+                "COALESCE(password_changed_at,0) AS password_changed_at, "
+                "COALESCE(is_active,1) AS is_active FROM users ORDER BY created_at ASC"
             ).fetchall()
         return [self._row_to_user(r) for r in rows]
 
@@ -248,6 +260,8 @@ class AuthStore:
             id=r["id"], username=r["username"], role=r["role"], created_at=r["created_at"],
             email=r["email"] if "email" in r.keys() else "",
             must_change_password=bool(r["must_change_password"]) if "must_change_password" in r.keys() else False,
+            password_changed_at=float(r["password_changed_at"]) if "password_changed_at" in r.keys() else 0.0,
+            is_active=bool(r["is_active"]) if "is_active" in r.keys() else True,
         )
 
     def get_by_username(self, username: str) -> Optional[User]:
@@ -257,7 +271,9 @@ class AuthStore:
         with self._lock, self._conn() as c:
             r = c.execute(
                 "SELECT id, username, role, created_at, COALESCE(email,'') AS email, "
-                "COALESCE(must_change_password,0) AS must_change_password FROM users WHERE username=?",
+                "COALESCE(must_change_password,0) AS must_change_password, "
+                "COALESCE(password_changed_at,0) AS password_changed_at, "
+                "COALESCE(is_active,1) AS is_active FROM users WHERE username=?",
                 (username,),
             ).fetchone()
         return self._row_to_user(r) if r else None
@@ -266,7 +282,9 @@ class AuthStore:
         with self._lock, self._conn() as c:
             r = c.execute(
                 "SELECT id, username, role, created_at, COALESCE(email,'') AS email, "
-                "COALESCE(must_change_password,0) AS must_change_password FROM users WHERE id=?",
+                "COALESCE(must_change_password,0) AS must_change_password, "
+                "COALESCE(password_changed_at,0) AS password_changed_at, "
+                "COALESCE(is_active,1) AS is_active FROM users WHERE id=?",
                 (uid,),
             ).fetchone()
         return self._row_to_user(r) if r else None
@@ -286,6 +304,16 @@ class AuthStore:
         with self._lock, self._conn() as c:
             c.execute("DELETE FROM users WHERE username=?", (username,))
 
+    def set_active(self, username: str, is_active: bool) -> None:
+        """启用/停用账号。停用后该用户无法登录、已签发 token 立即失效（见 verify_token）。"""
+        username = username.strip().lower()
+        if username == DEFAULT_ADMIN_USERNAME and not is_active:
+            raise AuthError("不能停用默认管理员")
+        with self._lock, self._conn() as c:
+            cur = c.execute("UPDATE users SET is_active=? WHERE username=?", (1 if is_active else 0, username))
+            if cur.rowcount == 0:
+                raise AuthError(f"用户不存在: {username}")
+
     def set_password(self, username: str, new_password: str, *, enforce_strength: bool = True,
                      clear_must_change: bool = True) -> None:
         if not new_password:
@@ -295,12 +323,14 @@ class AuthStore:
             if not ok:
                 raise AuthError(msg)
         username = username.strip().lower()
+        now = time.time()
         h = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt(rounds=10)).decode("utf-8")
+        # 改密即刷新 password_changed_at → 所有签发更早的 token 立即失效（吊销旧 token）。
         with self._lock, self._conn() as c:
             if clear_must_change:
-                cur = c.execute("UPDATE users SET password_hash=?, must_change_password=0 WHERE username=?", (h, username))
+                cur = c.execute("UPDATE users SET password_hash=?, must_change_password=0, password_changed_at=? WHERE username=?", (h, now, username))
             else:
-                cur = c.execute("UPDATE users SET password_hash=? WHERE username=?", (h, username))
+                cur = c.execute("UPDATE users SET password_hash=?, password_changed_at=? WHERE username=?", (h, now, username))
             if cur.rowcount == 0:
                 raise AuthError(f"用户不存在: {username}")
 
@@ -314,7 +344,9 @@ class AuthStore:
             r = c.execute(
                 "SELECT id, username, password_hash, role, created_at, "
                 "COALESCE(email,'') AS email, "
-                "COALESCE(must_change_password,0) AS must_change_password "
+                "COALESCE(must_change_password,0) AS must_change_password, "
+                "COALESCE(password_changed_at,0) AS password_changed_at, "
+                "COALESCE(is_active,1) AS is_active "
                 "FROM users WHERE username=?",
                 (username,),
             ).fetchone()
@@ -322,10 +354,14 @@ class AuthStore:
             raise AuthError("用户名或密码错误")
         if not bcrypt.checkpw(password.encode("utf-8"), r["password_hash"].encode("utf-8")):
             raise AuthError("用户名或密码错误")
+        if not bool(r["is_active"] if "is_active" in r.keys() else 1):
+            raise AuthError("账号已停用，请联系管理员")
         return User(
             id=r["id"], username=r["username"], role=r["role"], created_at=r["created_at"],
             email=r["email"] if "email" in r.keys() else "",
             must_change_password=bool(r["must_change_password"]) if "must_change_password" in r.keys() else False,
+            password_changed_at=float(r["password_changed_at"]) if "password_changed_at" in r.keys() else 0.0,
+            is_active=bool(r["is_active"]) if "is_active" in r.keys() else True,
         )
 
     def issue_token(self, user: User) -> str:
@@ -352,6 +388,13 @@ class AuthStore:
         user = self.get_by_id(uid)
         if not user:
             raise AuthError("用户不存在")
+        # 停用账号：已签发 token 立即失效（禁用即生效，不必等过期）。
+        if not getattr(user, "is_active", True):
+            raise AuthError("账号已停用，请联系管理员")
+        # 改密吊销：token 签发时间（iat）早于最近一次改密 → 视为失效，强制重新登录。
+        pwd_changed = float(getattr(user, "password_changed_at", 0) or 0)
+        if pwd_changed > 0 and int(payload.get("iat") or 0) < int(pwd_changed):
+            raise AuthError("密码已修改，请重新登录")
         return user
 
 

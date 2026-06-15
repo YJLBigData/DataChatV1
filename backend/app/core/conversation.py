@@ -169,8 +169,13 @@ def get_conversation_store(path: str | Path | None = None) -> ConversationStore:
     if _default_store is not None:
         return _default_store
     if path is None:
-        from app.core.config import load_config
-        backend_root = load_config().app.semantic_path.parent.parent.parent
-        path = Path(backend_root) / "logs" / "datachat_conversations.db"
+        import os
+        env_path = os.environ.get("DATACHAT_CONV_DB")
+        if env_path:
+            path = Path(env_path)
+        else:
+            from app.core.config import load_config
+            backend_root = load_config().app.semantic_path.parent.parent.parent
+            path = Path(backend_root) / "logs" / "datachat_conversations.db"
     _default_store = ConversationStore(path)
     return _default_store

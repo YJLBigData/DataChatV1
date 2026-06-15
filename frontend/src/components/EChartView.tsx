@@ -7,9 +7,23 @@
  *   format 用 display_columns 信息（千分位/万亿/百分号）做 axis label/tooltip。
  */
 import { useEffect, useMemo, useRef } from "react";
-import * as echarts from "echarts";
+// 按需注册（#19）：只引入实际用到的图表 + 组件 + 渲染器，避免打包整个 echarts（~1.1MB）。
+import * as echarts from "echarts/core";
+import {
+  BarChart, LineChart, PieChart, ScatterChart, FunnelChart, HeatmapChart, TreemapChart,
+} from "echarts/charts";
+import {
+  GridComponent, TooltipComponent, LegendComponent, VisualMapComponent,
+} from "echarts/components";
+import { CanvasRenderer } from "echarts/renderers";
 
 import type { AnswerTable, ChartMode, DisplayColumn } from "../types";
+
+echarts.use([
+  BarChart, LineChart, PieChart, ScatterChart, FunnelChart, HeatmapChart, TreemapChart,
+  GridComponent, TooltipComponent, LegendComponent, VisualMapComponent,
+  CanvasRenderer,
+]);
 
 interface Props {
   mode: ChartMode;
@@ -50,7 +64,7 @@ function asNumber(value: any): number {
 
 export function EChartView({ mode, table, height = 320 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
-  const chart = useRef<echarts.ECharts | null>(null);
+  const chart = useRef<ReturnType<typeof echarts.init> | null>(null);
 
   const option = useMemo(() => buildOption(mode, table), [mode, table]);
 

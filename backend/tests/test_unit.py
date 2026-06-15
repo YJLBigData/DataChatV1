@@ -250,6 +250,49 @@ def test_semantic_schema_overrides_from_env(cfg, monkeypatch):
         assert t.schema == "chatbi"
 
 
+def test_config_placeholder_normalization(monkeypatch):
+    """P1-5：配置层把"请填写/PLEASE_REPLACE"占位符视为未配置（对齐 start.sh），
+    避免中文占位符密码传给 PyMySQL 触发 latin-1 编码错误。"""
+    from app.core import config as cfgmod
+    assert cfgmod._is_placeholder("请填写你的数据库密码")
+    assert cfgmod._is_placeholder("sk-请填写")
+    assert cfgmod._is_placeholder("PLEASE_REPLACE_AES_KEY")
+    assert cfgmod._is_placeholder("")
+    assert not cfgmod._is_placeholder("realpassword123")
+    # _coalesce_env 跳过占位符 → 回退 default（空密码可被 latin-1 安全 encode）
+    monkeypatch.setenv("MYSQL_PASSWORD", "请填写")
+    monkeypatch.delenv("DB_PASSWORD", raising=False)
+    pwd = cfgmod._coalesce_env("MYSQL_PASSWORD", "DB_PASSWORD", default="")
+    assert pwd == ""
+    pwd.encode("latin-1")  # 不抛 UnicodeEncodeError
+    # 非占位符正常返回
+    monkeypatch.setenv("MYSQL_PASSWORD", "S3cret!")
+    assert cfgmod._coalesce_env("MYSQL_PASSWORD", default="") == "S3cret!"
+
+
+def test_semantic_versions_module(tmp_path):
+    """#15：语义层校验（dry-run）+ 版本快照 / 列表 / 读取 / 防路径穿越。"""
+    from app.core import semantic_versions as sv
+    # 语法错误
+    assert sv.validate_semantic("tables: [")["ok"] is False
+    # 缺必填键
+    r = sv.validate_semantic("tables: {}\nmetrics: {}")
+    assert r["ok"] is False and any("dimensions" in e for e in r["errors"])
+    # 合法 + 计数
+    good = "tables:\n  t1: {}\nmetrics:\n  m1: {}\ndimensions:\n  d1: {}\n"
+    rv = sv.validate_semantic(good)
+    assert rv["ok"] is True and rv["summary"] == {"tables": 1, "metrics": 1, "dimensions": 1}
+    # 快照 → 列表 → 读取 roundtrip
+    p = tmp_path / "semantic.yaml"
+    p.write_text(good, encoding="utf-8")
+    vid = sv.snapshot(p)
+    assert vid and vid in [v["id"] for v in sv.list_versions(p)]
+    assert sv.read_version(p, vid) == good
+    # 非法版本号防穿越
+    with pytest.raises(ValueError):
+        sv.read_version(p, "../../etc/passwd")
+
+
 def test_metric_alias_resolves(semantic: SemanticLayer):
     assert semantic.find_metric_by_alias("终端销售额").name == "terminal_sale_amount_total"
     assert semantic.find_metric_by_alias("销售额").name == "terminal_sale_amount_total"

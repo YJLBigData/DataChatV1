@@ -160,6 +160,7 @@ export interface AuthUser {
   created_at?: number;
   email?: string;
   must_change_password?: boolean;
+  is_active?: boolean;
 }
 
 export interface QueryLogEntry {

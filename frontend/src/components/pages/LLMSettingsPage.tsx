@@ -97,13 +97,18 @@ export function LLMSettingsPage() {
     }
     setTesting(true); setErr(null); setTestResult(null);
     try {
-      // 编辑场景：未输入新 key 时把后端已存的 key 也带过去测一发？后端 /test 不读库，
-      // 这里测的是"用户当前看到/即将保存的配置"。未触碰旧 key → 用空 api_key 测会失败。
-      // 解决：编辑时若未触碰，让后端用 preset id 测（用 existing test endpoint）。
+      // 编辑场景（P1）：未输入新 AK 时，用后端已存的旧 AK + **当前草稿的 base_url/model**
+      // 合并测试（传 preset_id + 空 api_key），测的就是即将保存的配置；
+      // 而不是测旧的整套（那样改了 base_url/model 也会"测通过却存进未测的新值"）。
       let res: LLMPresetTestResult;
       if (editing && !draft.api_key_touched && draft.provider === "bailian") {
-        // 测已存的（用旧 key），但前端字段改的 model/base 还没保存——提示用户先存
-        res = await api.adminTestExistingLLMPreset(editing.id);
+        res = await api.adminTestLLMPresetCandidate({
+          provider: draft.provider,
+          api_key: "",                // 空 → 后端用 preset_id 对应的旧 AK
+          base_url: draft.base_url,
+          model: draft.model,
+          preset_id: editing.id,
+        });
       } else {
         res = await api.adminTestLLMPresetCandidate({
           provider: draft.provider,

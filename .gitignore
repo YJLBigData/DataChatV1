@@ -41,6 +41,10 @@ frontend/node_modules/
 !backend/config/env/*.env
 
 # 运行态 / 工具目录（绝不入库）
+# 统一运行时根目录约定：新产物可写到 .runtime/；旧路径（logs/.pids/...）仍兼容。
+# 一键清理可再生产物：scripts/clean_runtime.sh（--all 连本地 SQLite 库一起清）。
+.runtime/
+**/.runtime/
 .pids/
 **/.pids/
 *.pid

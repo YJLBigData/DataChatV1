@@ -20,6 +20,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, auth, friendlyError } from "./api";
+import { useLLMProviders } from "./hooks/useLLMProviders";
+import { useConversations } from "./hooks/useConversations";
 import { AnswerCard } from "./components/AnswerCard";
 import { Composer } from "./components/Composer";
 import { ConversationList } from "./components/ConversationList";
@@ -53,7 +55,8 @@ export default function App() {
 
   /* ------------------------------- chat state ------------------------------ */
   const DRAFT_KEY = "__draft__";
-  const [conversations, setConversations] = useState<ConversationMeta[]>([]);
+  // 会话列表（#17：抽到 useConversations）。
+  const { conversations, setConversations, refreshConversations } = useConversations(!!user);
   const [activeId, setActiveId] = useState<string | null>(null);
   /** 每个对话独立的 turns，draft（未保存）放在 __draft__ key。允许同时多个对话流式进行。 */
   const [turnsByConv, setTurnsByConv] = useState<Record<string, ChatTurn[]>>({});
@@ -66,6 +69,8 @@ export default function App() {
   const [input, setInput] = useState("");
   const [forceRefresh, setForceRefresh] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  /** 移动端（< md）侧栏抽屉开关；桌面端常驻不受此影响。 */
+  const [mobileNav, setMobileNav] = useState(false);
   const viewportRef = useRef<HTMLDivElement | null>(null);
 
   const turns = useMemo(() => {
@@ -94,41 +99,8 @@ export default function App() {
   const [reportFor, setReportFor] = useState<ChatTurn | null>(null);
 
   /* --------------- LLM provider 切换（右上角下拉，每次 chat 请求都传） --------------- */
-  type LLMProvider = { id: string; label: string; hint: string };
-  const [llmProviders, setLlmProviders] = useState<LLMProvider[]>([]);
-  const [llmDefault, setLlmDefault] = useState<string>("");
-  const LLM_STORAGE_KEY = "datachatv1:llm_provider";
-  const [llmChoice, setLlmChoice] = useState<string>(
-    () => (typeof window !== "undefined" && localStorage.getItem(LLM_STORAGE_KEY)) || "",
-  );
-
-  // 提取为可复用函数：LLM 设置页新建/编辑/删除/设默认后会触发同名事件来重拉，
-  // 让右上角下拉框无需刷新页面就能拿到最新的 preset 列表。
-  const reloadLLMProviders = useCallback(async () => {
-    try {
-      const r = await api.listLLMProviders();
-      setLlmProviders(r.available || []);
-      setLlmDefault(r.default || "");
-      setLlmChoice((cur) => {
-        const ids = (r.available || []).map((x) => x.id);
-        if (cur && ids.includes(cur)) return cur;
-        return r.default || ids[0] || "";
-      });
-    } catch {
-      /* 拉不到列表不阻塞主流程 */
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!user) return;
-    void reloadLLMProviders();
-    const onChanged = () => { void reloadLLMProviders(); };
-    window.addEventListener("datachat:llm_providers_changed", onChanged);
-    return () => window.removeEventListener("datachat:llm_providers_changed", onChanged);
-  }, [user, reloadLLMProviders]);
-  useEffect(() => {
-    if (llmChoice) localStorage.setItem(LLM_STORAGE_KEY, llmChoice);
-  }, [llmChoice]);
+  // #17：抽到 useLLMProviders（状态 + localStorage 持久化 + 变更事件重拉）。
+  const { llmProviders, llmDefault, llmChoice, setLlmChoice } = useLLMProviders(!!user);
 
   /* ----------------------------- 401 handling ------------------------------ */
   useEffect(() => {
@@ -153,29 +125,11 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
-  /* ----------------------- conversations after login ----------------------- */
-  useEffect(() => {
-    if (!user) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const cs = await api.listConversations();
-        if (!cancelled) setConversations(cs.items || []);
-      } catch { /* ignore */ }
-    })();
-    return () => { cancelled = true; };
-  }, [user]);
-
   useEffect(() => {
     const v = viewportRef.current;
     if (!v) return;
     v.scrollTo({ top: v.scrollHeight, behavior: turns.length > 1 ? "smooth" : "auto" });
   }, [turns]);
-
-  const refreshConversations = useCallback(async () => {
-    if (!user) return;
-    try { setConversations((await api.listConversations()).items || []); } catch { /* ignore */ }
-  }, [user]);
 
   /* ------------------------------- chat fns -------------------------------- */
   /**
@@ -471,17 +425,27 @@ export default function App() {
   /* ------------------------------- main render ----------------------------- */
   return (
     <div className="flex h-full w-full bg-[#f5f7fc]">
-      {/* left main nav */}
-      <Sidebar user={user} current={page} onChange={setPage} />
+      {/* 移动端抽屉遮罩（点击关闭） */}
+      {mobileNav && (
+        <div className="fixed inset-0 z-30 bg-slate-900/30 backdrop-blur-sm md:hidden" onClick={() => setMobileNav(false)} />
+      )}
 
-      {/* page area (conversations sidebar + main) */}
-      <div className="flex flex-1 min-w-0">
+      {/* 导航簇（主导航 + 会话栏）：桌面常驻；移动端为 off-canvas 抽屉 */}
+      <div
+        className={
+          "z-40 flex h-full shrink-0 transition-transform duration-200 md:static md:z-auto md:translate-x-0 " +
+          (mobileNav ? "fixed inset-y-0 left-0 translate-x-0" : "fixed inset-y-0 left-0 -translate-x-full md:translate-x-0")
+        }
+      >
+        {/* left main nav */}
+        <Sidebar user={user} current={page} onChange={(p) => { setPage(p); setMobileNav(false); }} />
+
         {page === "chat" && (
           <ConversationList
             items={conversations}
             activeId={activeId}
-            onPick={openConversation}
-            onNew={startNew}
+            onPick={(id) => { openConversation(id); setMobileNav(false); }}
+            onNew={() => { startNew(); setMobileNav(false); }}
             onRename={renameConversation}
             onDelete={deleteConversation}
             collapsed={sidebarCollapsed}
@@ -490,16 +454,26 @@ export default function App() {
             streamingCids={streamingConvs}
           />
         )}
+      </div>
 
+      {/* page area (main) */}
+      <div className="flex flex-1 min-w-0">
         <main className="flex flex-1 min-w-0 flex-col">
-          <header className="flex items-center justify-between border-b bg-white px-5 py-3" style={{ borderColor: "#eef1f8" }}>
-            <div className="flex items-center gap-3">
+          <header className="flex items-center justify-between border-b bg-white px-4 py-3 sm:px-5" style={{ borderColor: "#eef1f8" }}>
+            <div className="flex items-center gap-2 sm:gap-3">
+              {/* 移动端汉堡按钮：打开导航抽屉 */}
+              <button
+                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 md:hidden"
+                title="菜单" onClick={() => setMobileNav(true)}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 6h16M4 12h16M4 18h16" strokeLinecap="round" /></svg>
+              </button>
               <div className="qq-avatar !h-8 !w-8 !rounded-xl !text-base">Q</div>
               <div>
                 <div className="text-[15px] font-semibold tracking-tight text-slate-800">
                   飞鹤小Q · 智能问数
                 </div>
-                <div className="text-[11px] text-slate-400">交给小Q，你可以相信我</div>
+                <div className="hidden text-[11px] text-slate-400 sm:block">交给小Q，你可以相信我</div>
               </div>
             </div>
             <div className="flex items-center gap-3">
@@ -511,7 +485,7 @@ export default function App() {
           {/* ====================== chat page ====================== */}
           {page === "chat" && (
             <>
-              <section ref={viewportRef} className="flex-1 overflow-y-auto py-5" style={{ paddingLeft: 80, paddingRight: 80 }}>
+              <section ref={viewportRef} className="flex-1 overflow-y-auto px-4 py-5 sm:px-8 lg:px-20">
                 {turns.length === 0 ? (
                   <Hero
                     suggestions={boot.suggestions}
@@ -552,6 +526,10 @@ export default function App() {
                           onPushFeishu={async () => {
                             const r = turn.result;
                             if (!r) return { ok: false, msg: "无结果" };
+                            // 安全（P0）：推送内容由后端按 (conversation_id, trace_id) 取可信
+                            // 结果生成，前端不再传 narrative/highlights/rows_preview。
+                            const cid = r.conversation_id || activeId;
+                            if (!r.trace_id || !cid || cid === DRAFT_KEY) return { ok: false, msg: "会话未保存，无法推送" };
                             // 推送策略：
                             //   · admin 账号（含 admin@feihe.com）通常不是飞鹤真人邮箱，
                             //     直接用自己的 email 去飞书 batch_get_id 拉不到 open_id → 必失败。
@@ -575,10 +553,8 @@ export default function App() {
                             }
                             try {
                               const res = await api.feishuPush({
-                                title: turn.question.slice(0, 30) || "飞鹤经营分析",
-                                narrative: r.answer.narrative,
-                                highlights: r.answer.highlights || [],
-                                rows_preview: (r.answer.table?.display_rows || []).slice(0, 5).map((row) => row.join(" | ")),
+                                conversation_id: cid,
+                                trace_id: r.trace_id,
                                 ...(target_email ? { user_email: target_email } : {}),
                               });
                               // 后端失败时返回 HTTP 200 + ok:false，必须按 ok 判定，不能只看是否抛错
@@ -654,13 +630,19 @@ export default function App() {
         onClose={() => setReportFor(null)}
         onDownload={async (template_id) => {
           const r = reportFor?.result; if (!r) return;
+          // 安全（P0）：报告内容由后端按 (conversation_id, trace_id) 取可信结果生成，
+          // 前端不再传 question/answer/plan/sql。
+          const cid = r.conversation_id || activeId;
+          if (!r.trace_id || !cid || cid === DRAFT_KEY) {
+            throw new Error("会话未保存，无法生成报告。请稍候重试。");
+          }
           const tk = auth.getToken();
           const headers: Record<string, string> = { "Content-Type": "application/json" };
           if (tk) headers["Authorization"] = "Bearer " + tk;
           const resp = await fetch(api.reportDownloadUrl(), {
             method: "POST", headers,
             body: JSON.stringify({
-              question: reportFor!.question, answer: r.answer, plan: r.plan, sql: r.sql,
+              conversation_id: cid, trace_id: r.trace_id,
               template_id: template_id || undefined,
             }),
           });

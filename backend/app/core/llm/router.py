@@ -236,6 +236,13 @@ class LLMRouter:
         #   ③ 当前 active preset 的 provider
         #   ④ legacy 单条 LLM_PROVIDER
         #   ⑤ cfg primary
+        #
+        # 安全（P0）：一旦解析出 provider==feihe（无论来自下拉显式选择、preset，还是
+        # 部署默认 LLM_PROVIDER），都视为"明确要求走飞鹤公司网关"。此时若网关未配置
+        # AES_KEY，**必须 fail closed 抛错**，绝不静默回退百炼 / DashScope —— 否则
+        # 用户以为在用公司内网 Agent，实际请求被偷偷转发到外部接口（且常因无 key 直接
+        # 401），与「业务走公司网关」的预期冲突。允许用外部模型，但必须是用户**显式**
+        # 改选，而不是系统背着用户切换。
         override = (_provider_override.get() or "").strip()
         if override == "legacy_bailian":
             return False
@@ -256,10 +263,23 @@ class LLMRouter:
                     timeout_seconds=self.llm.timeout_seconds,
                     connect_timeout_seconds=self.llm.connect_timeout_seconds,
                 )
-            return bool(self._feihe.configured)
+            configured = bool(self._feihe.configured)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("feihe gateway unavailable, fallback to bailian: %s", exc)
-            return False
+            # 构造/导入失败（缺依赖等）：已明确选飞鹤，绝不静默改用外部模型。
+            logger.error("feihe gateway init failed (fail closed, no bailian fallback): %s", exc)
+            raise LLMError(
+                "已选择「飞鹤 ADP Agent」，但公司网关初始化失败（请联系管理员检查 "
+                "AES_KEY / 依赖配置）。为避免业务请求被转发到外部模型，已停止本次调用。"
+            ) from exc
+        if configured:
+            return True
+        # provider 解析为 feihe 但 AES_KEY 未配置 → fail closed，不回退百炼。
+        logger.error("feihe selected but AES_KEY not configured — fail closed (no bailian fallback)")
+        raise LLMError(
+            "已选择「飞鹤 ADP Agent」，但服务器未配置 AES_KEY，无法调用公司内网模型网关。"
+            "请在服务器 .env 配置 AES_KEY 后重试，或在右上角改选其它模型（如百炼）。"
+            "（系统不会自动改用外部模型，以免与「业务数据走公司网关」的预期冲突）"
+        )
 
     # ------------------------------------------------------------------ chat
 

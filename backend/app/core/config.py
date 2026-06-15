@@ -17,11 +17,29 @@ def _project_root() -> Path:
     return _backend_root().parent
 
 
+# 占位符标记：与 start.sh 的 is_placeholder 对齐（"请填写" / "PLEASE_REPLACE"）。
+# 配置层必须统一归一化，不能只在启动脚本里处理 —— 否则 `python -m uvicorn`、pytest、
+# 其它入口拿到的还是中文占位符，传给 PyMySQL 会触发 latin-1 编码错误（问数/诊断直接崩）。
+_PLACEHOLDER_MARKERS = ("请填写", "请替换", "PLEASE_REPLACE")
+
+
+def _is_placeholder(value: str) -> bool:
+    v = (value or "").strip()
+    if not v:
+        return True
+    low = v.lower()
+    return any(m.lower() in low for m in _PLACEHOLDER_MARKERS)
+
+
 def _coalesce_env(*names: str, default: str = "") -> str:
+    """取第一个"已配置且非占位符"的环境变量值；占位符（请填写/PLEASE_REPLACE）视为未配置。"""
     for name in names:
         value = os.environ.get(name)
-        if value not in (None, ""):
-            return str(value)
+        if value in (None, ""):
+            continue
+        if _is_placeholder(value):
+            continue
+        return str(value)
     return default
 
 

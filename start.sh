@@ -271,8 +271,18 @@ if [ ! -d "$FRONTEND/node_modules" ]; then
     red "  npm install 失败，查看 /tmp/datachat-npm.log"; exit 5;
   }
 fi
-if [ ! -f "$BACKEND/web/index.html" ] || [ "${1:-}" = "--rebuild" ]; then
-  gray "  vite build → backend/web …"
+# 重建判定：① 显式 --rebuild ② 缺产物 ③ 前端源码比已构建产物新（避免本地跑旧 UI）。
+if [ "${1:-}" = "--rebuild" ]; then
+  _do_build=1; _reason="--rebuild"
+elif [ ! -f "$BACKEND/web/index.html" ]; then
+  _do_build=1; _reason="缺少构建产物"
+elif [ -n "$(find "$FRONTEND/src" "$FRONTEND/index.html" "$FRONTEND/package.json" "$FRONTEND/vite.config.ts" -newer "$BACKEND/web/index.html" -print -quit 2>/dev/null)" ]; then
+  _do_build=1; _reason="前端源码有更新"
+else
+  _do_build=0
+fi
+if [ "$_do_build" = "1" ]; then
+  gray "  vite build → backend/web …（$_reason）"
   ( cd "$FRONTEND" && npx vite build ) >/tmp/datachat-build.log 2>&1 || {
     red "  前端构建失败，查看 /tmp/datachat-build.log"; exit 5;
   }

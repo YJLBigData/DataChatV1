@@ -119,202 +119,24 @@ def normalize_chat_result(value: Any) -> dict[str, Any]:
 
 
 # -------------------------------------------------------------- request models
-# 必须模块级定义，否则 FastAPI 在 `from __future__ import annotations` 下解析不到
-
-class LoginReq(BaseModel):
-    username: str
-    password: str
-
-
-class ChatRequest(BaseModel):
-    question: str
-    conversation_id: Optional[str] = None
-    force_refresh: bool = False
-    skip_llm_narrative: bool = False
-    # 右上角下拉框选的模型，None=用 env 默认（线上=feihe）
-    llm_provider: Optional[str] = None
-
-
-class ConversationCreateReq(BaseModel):
-    title: str = "新会话"
-
-
-class ConversationRenameReq(BaseModel):
-    title: str = "新会话"
-
-
-class FeishuPushReq(BaseModel):
-    title: str = "飞鹤小Q · 经营分析"
-    narrative: str
-    highlights: list[str] = Field(default_factory=list)
-    rows_preview: list[str] = Field(default_factory=list)
-    user_email: Optional[str] = None
-    webhook: Optional[str] = None
-    url: Optional[str] = None
-
-
-class ReportRequest(BaseModel):
-    question: str
-    answer: dict[str, Any]
-    plan: dict[str, Any] = Field(default_factory=dict)
-    sql: str = ""
-    template_id: Optional[str] = None    # 留空 = 用默认模板
-
-
-class ReportTemplateReq(BaseModel):
-    name: str
-    prompt: str
-    is_default: bool = False
-    system: bool = False   # 仅 admin 生效：true 时创建系统级模板(user_id="")，否则私有模板
-
-
-class ReportTemplatePatchReq(BaseModel):
-    name: Optional[str] = None
-    prompt: Optional[str] = None
-    is_default: Optional[bool] = None
-
-
-class LLMSettingsPutReq(BaseModel):
-    """[legacy] 管理页旧的"单条配置"接口入参（None=不动；""=清除）。新前端走 preset CRUD。"""
-    DASHSCOPE_API_KEY: Optional[str] = Field(default=None, description="百炼 AK，sk-...")
-    DASHSCOPE_BASE_URL: Optional[str] = Field(default=None, description="百炼 base URL")
-    DASHSCOPE_MODEL: Optional[str] = Field(default=None, description="百炼 chat 模型名 (qwen-plus / qwen-max / qwen3.6-max-preview 等)")
-    DASHSCOPE_EMBED_MODEL: Optional[str] = Field(default=None, description="百炼 embedding 模型 (text-embedding-v3 等)")
-    LLM_PROVIDER: Optional[str] = Field(default=None, description="默认 provider: bailian / feihe")
-
-
-class LLMPresetCreateReq(BaseModel):
-    name: str = Field(..., description="显示名，唯一")
-    provider: str = Field(..., description="'bailian' 或 'feihe'")
-    api_key: str = Field("", description="bailian 必填；feihe 留空（AES_KEY 在服务器 .env）")
-    base_url: str = Field("", description="bailian: https://dashscope.aliyuncs.com/compatible-mode/v1")
-    model: str = Field(..., description="chat 模型名（如 qwen-plus / qwen-max）")
-    embed_model: str = Field("", description="bailian 才用，如 text-embedding-v3")
-
-
-class LLMPresetPatchReq(BaseModel):
-    name: Optional[str] = None
-    provider: Optional[str] = None
-    api_key: Optional[str] = None   # None=不动；""=清空；非空=替换
-    base_url: Optional[str] = None
-    model: Optional[str] = None
-    embed_model: Optional[str] = None
-    is_active: Optional[bool] = None
-
-
-class LLMPresetTestReq(BaseModel):
-    """保存前测试：用候选配置直发一次 chat，不写库。"""
-    provider: str
-    api_key: str = ""
-    base_url: str = ""
-    model: str
-    prompt: Optional[str] = None
-
-
-class FolderCreateReq(BaseModel):
-    name: str
-    color: str = ""
-
-
-class FolderRenameReq(BaseModel):
-    name: str
-    color: Optional[str] = None
-
-
-class CollectionReq(BaseModel):
-    conversation_id: str
-    folder_id: str
-
-
-class CreateUserReq(BaseModel):
-    username: str
-    password: Optional[str] = None       # 留空则后端随机生成一次性强密码
-    role: str = "user"
-    email: str = ""                       # 用户的飞书邮箱（飞书推送用）
-    must_change_password: bool = True     # 后台创建的用户默认强制改密
-
-
-class ResetPasswordReq(BaseModel):
-    new_password: Optional[str] = None    # 留空 = 随机生成一次性密码并返回
-    must_change_password: bool = True
-
-
-class MyPasswordReq(BaseModel):
-    old_password: str
-    new_password: str
-
-
-class MyProfileReq(BaseModel):
-    email: Optional[str] = None
-
-
-class SemanticPutReq(BaseModel):
-    content: str           # 完整 YAML 文本
-
-
-class SemanticEntityReq(BaseModel):
-    name: str
-    body: dict[str, Any] = Field(default_factory=dict)
-
-
-class SemanticAnalyzeReq(BaseModel):
-    table: str             # 物理表名（chatbi 库中实际存在的表）
-    sample_rows: int = 5
-
-
-class SemanticStatusReq(BaseModel):
-    status: str            # draft | verified
-
-
-class ChatFeedbackReq(BaseModel):
-    """问数答案反馈：up=采纳（沉淀为 few-shot），down=点踩（进 bad case 库）。"""
-    conversation_id: str
-    trace_id: str
-    vote: str = "up"       # up | down
-
-
-class PermissionsPutReq(BaseModel):
-    """完整权限配置 — 任一字段省略 = 不变；明确传 {} 或 [] = 清空。"""
-    row_rules:        Optional[dict[str, list[str]]] = None
-    allowed_tables:   Optional[list[str]] = None
-    allowed_columns:  Optional[dict[str, list[str]]] = None
-    deny_by_default:  Optional[bool] = None
+# 抽到 app/api/schemas.py（#16）；此处 re-export，保持 `from app.main import XxxReq` 兼容。
+from app.api.schemas import (  # noqa: E402
+    LoginReq, ChatRequest, ConversationCreateReq, ConversationRenameReq,
+    FeishuPushReq, ReportRequest, ReportTemplateReq, ReportTemplatePatchReq,
+    LLMSettingsPutReq, LLMPresetCreateReq, LLMPresetPatchReq, LLMPresetTestReq,
+    FolderCreateReq, FolderRenameReq, CollectionReq, CreateUserReq,
+    ResetPasswordReq, UserActiveReq, MyPasswordReq, MyProfileReq,
+    SemanticPutReq, SemanticEntityReq, SemanticAnalyzeReq, SemanticStatusReq,
+    ChatFeedbackReq, PermissionsPutReq,
+)
 
 
 # ----------------------------------------------------------- auth dependencies
-
-def _bearer_token(authorization: Optional[str]) -> str:
-    if not authorization:
-        return ""
-    parts = authorization.split(" ", 1)
-    if len(parts) == 2 and parts[0].lower() == "bearer":
-        return parts[1].strip()
-    return authorization.strip()
-
-
-# 未改密用户仅可访问：查看自己 / 改密。其它核心接口一律 403。
-_PW_CHANGE_EXEMPT_PATHS = {"/api/me", "/api/me/password"}
-
-
-def require_user(request: Request, authorization: Optional[str] = Header(None)) -> User:
-    token = _bearer_token(authorization)
-    try:
-        user = get_auth_store().verify_token(token)
-    except AuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
-    # 后端强制：未改初始密码的用户不能访问核心接口（不依赖前端引导）
-    if user.must_change_password and request.url.path not in _PW_CHANGE_EXEMPT_PATHS:
-        raise HTTPException(
-            status_code=403,
-            detail="MUST_CHANGE_PASSWORD:请先修改初始密码后再使用系统功能",
-        )
-    return user
-
-
-def require_admin(user: User = Depends(require_user)) -> User:
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-    return user
+# 抽到 app/api/deps.py（#16）；此处 re-export，保持 `from app.main import require_user` 等兼容。
+from app.api.deps import (  # noqa: E402
+    _bearer_token, _PW_CHANGE_EXEMPT_PATHS, _authenticate_or_403,
+    require_user, require_admin,
+)
 
 
 # ----------------------------------------------------------------- app factory
@@ -410,6 +232,20 @@ def create_app() -> FastAPI:
             logger.warning("prometheus instrument failed (skipped): %s", exc)
     else:
         logger.warning("prometheus-fastapi-instrumentator not installed — /metrics disabled")
+
+    # 阶段 P1：/metrics 访问控制 —— 生产仅 localhost/内网/带 METRICS_TOKEN 可访问，
+    # 杜绝公网无鉴权拉取运行指标（端点 QPS/延迟/路由分布等属内部信息）。
+    @app.middleware("http")
+    async def _guard_metrics(request: Request, call_next):
+        if request.url.path == "/metrics":
+            if not _metrics_access_allowed(
+                is_local=_is_local,
+                client_ip=(request.client.host if request.client else ""),
+                auth_header=request.headers.get("authorization", ""),
+                token=(_os.environ.get("METRICS_TOKEN") or "").strip(),
+            ):
+                return JSONResponse(status_code=403, content={"detail": "metrics access restricted"})
+        return await call_next(request)
 
     # 兜底异常处理：任何未捕获异常都只回友好 JSON + trace_id，
     # 绝不把 traceback / str(exc) / 连接串 暴露给用户；真实异常进日志。
@@ -589,6 +425,20 @@ def create_app() -> FastAPI:
             out["one_time_password"] = new_pwd
         return out
 
+    @app.post("/api/admin/users/{username}/active")
+    def api_admin_set_user_active(username: str, req: UserActiveReq = Body(...), admin: User = Depends(require_admin)) -> dict[str, Any]:
+        """启用/停用账号。停用后该用户无法登录、已签发 token 立即失效。"""
+        if username.strip().lower() == admin.username and not req.is_active:
+            raise HTTPException(status_code=400, detail="不能停用当前登录的管理员账号")
+        store = get_auth_store()
+        if not hasattr(store, "set_active"):
+            raise HTTPException(status_code=501, detail="当前用户存储不支持启停")
+        try:
+            store.set_active(username, bool(req.is_active))
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True, "username": username, "is_active": bool(req.is_active)}
+
     # ============================================================ admin: query log
 
     @app.get("/api/admin/logs")
@@ -626,6 +476,20 @@ def create_app() -> FastAPI:
         """认证清单：草稿排前面，业务负责人按清单走查（表定位/指标口径/维度值字典）。"""
         from app.core.semantic_editor import certification_overview
         return certification_overview(Path(cfg.app.semantic_path))
+
+    # ---- #15：语义层版本快照 / 回滚（同样必须注册在 {kind} 之前）----
+    @app.get("/api/admin/semantic/versions")
+    def api_semantic_versions(_: User = Depends(require_admin)) -> dict[str, Any]:
+        from app.core.semantic_versions import list_versions
+        return {"items": list_versions(Path(cfg.app.semantic_path))}
+
+    @app.get("/api/admin/semantic/versions/{vid}")
+    def api_semantic_version_content(vid: str, _: User = Depends(require_admin)) -> dict[str, Any]:
+        from app.core.semantic_versions import read_version
+        try:
+            return {"id": vid, "content": read_version(Path(cfg.app.semantic_path), vid)}
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
 
     @app.get("/api/admin/semantic/{kind}")
     def api_semantic_list_entities(kind: str, _: User = Depends(require_admin)) -> dict[str, Any]:
@@ -699,29 +563,22 @@ def create_app() -> FastAPI:
             logger.exception("analyze_table failed: %s", exc)
             return friendly_error("INTERNAL_ERROR")
 
-    @app.put("/api/admin/semantic")
-    def api_admin_put_semantic(req: SemanticPutReq = Body(...), _: User = Depends(require_admin)) -> dict[str, Any]:
-        import yaml
+    def _apply_semantic_content(content: str) -> dict[str, Any]:
+        """校验 → 快照当前版本 → 写入 → 热重载。供 PUT 全文保存与版本回滚共用（#15）。"""
+        from app.core.semantic_versions import validate_semantic, snapshot
         path = Path(cfg.app.semantic_path)
+        check = validate_semantic(content)
+        if not check["ok"]:
+            raise HTTPException(status_code=400, detail="YAML 校验失败: " + "；".join(check["errors"]))
+        # 写入前快照当前版本（可回滚）+ 兼容旧的单份 .bak
         try:
-            parsed = yaml.safe_load(req.content)
-            if not isinstance(parsed, dict):
-                raise ValueError("根节点必须是 YAML mapping")
-            for must in ("tables", "metrics", "dimensions"):
-                if must not in parsed:
-                    raise ValueError(f"缺少必填字段: {must}")
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"YAML 校验失败: {exc}")
-        # backup + write atomically
-        backup = path.with_suffix(path.suffix + ".bak")
-        try:
+            snapshot(path)
             if path.exists():
-                backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
-            path.write_text(req.content, encoding="utf-8")
+                path.with_suffix(path.suffix + ".bak").write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            path.write_text(content, encoding="utf-8")
         except OSError as exc:
             logger.exception("write semantic file failed: %s", exc)
             raise HTTPException(status_code=500, detail="保存语义层文件失败，请稍后重试或联系管理员。")
-        # hot reload
         pipe = get_pipe()
         pipe.semantic.reload()
         try:
@@ -734,6 +591,28 @@ def create_app() -> FastAPI:
             "dimensions": len(pipe.semantic.dimensions),
             "tables": len(pipe.semantic.tables),
         }
+
+    @app.post("/api/admin/semantic/validate")
+    def api_admin_validate_semantic(req: SemanticPutReq = Body(...), _: User = Depends(require_admin)) -> dict[str, Any]:
+        """保存前 dry-run 校验（不落盘）：返回 ok / 错误列表 / 计数摘要（#15）。"""
+        from app.core.semantic_versions import validate_semantic
+        return validate_semantic(req.content)
+
+    @app.put("/api/admin/semantic")
+    def api_admin_put_semantic(req: SemanticPutReq = Body(...), _: User = Depends(require_admin)) -> dict[str, Any]:
+        return _apply_semantic_content(req.content)
+
+    @app.post("/api/admin/semantic/rollback/{vid}")
+    def api_admin_rollback_semantic(vid: str, _: User = Depends(require_admin)) -> dict[str, Any]:
+        """回滚到历史版本：读取该版本 → 走与保存一致的校验/快照/写入/热重载（#15）。"""
+        from app.core.semantic_versions import read_version
+        try:
+            content = read_version(Path(cfg.app.semantic_path), vid)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        result = _apply_semantic_content(content)
+        result["rolled_back_to"] = vid
+        return result
 
     # ============================================================ admin: permissions
 
@@ -843,9 +722,17 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         """保存前测试：用候选配置直接发一句问题，必须收到非空回复才返回 ok=True；不写库。"""
         from app.core.llm.test_runner import test_preset_config, DEFAULT_TEST_PROMPT
+        from app.core.llm_presets import get_llm_presets_store
+        api_key = req.api_key or ""
+        # 编辑场景（P1）：未输入新 AK（api_key 为空）但带了 preset_id → 用旧 AK + 草稿字段合并测试，
+        # 确保测的就是"即将保存的 base_url/model"，而不是旧的整套配置。
+        if req.provider == "bailian" and not api_key.strip() and req.preset_id:
+            existing = get_llm_presets_store().get(req.preset_id)
+            if existing and existing.provider == "bailian":
+                api_key = existing.api_key or ""
         result = test_preset_config(
             req.provider,
-            api_key=req.api_key, base_url=req.base_url,
+            api_key=api_key, base_url=req.base_url,
             model=req.model,
         )
         result["prompt"] = req.prompt or DEFAULT_TEST_PROMPT
@@ -948,11 +835,9 @@ def create_app() -> FastAPI:
         token: Optional[str] = Query(None),
         authorization: Optional[str] = Header(None),
     ) -> StreamingResponse:
+        # SSE 与普通接口共用统一鉴权：含 must_change_password 拦截，杜绝绕过改密限制。
         bearer = _bearer_token(authorization) or (token or "")
-        try:
-            user = get_auth_store().verify_token(bearer)
-        except AuthError as exc:
-            raise HTTPException(status_code=401, detail=str(exc))
+        user = _authenticate_or_403(bearer, request.url.path)
 
         pipe = get_pipe()
         store = get_conversation_store()
@@ -1091,7 +976,27 @@ def create_app() -> FastAPI:
     @app.post("/api/feishu/push")
     def api_feishu_push(req: FeishuPushReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
         import uuid as _uuid
+        import hashlib as _hashlib
         trace_id = _uuid.uuid4().hex
+        # 安全（P0）：推送的经营结论必须由后端按 trace 从会话存储取可信结果生成，
+        # 不信任前端传入的 narrative/highlights/rows_preview，杜绝伪造结论推送。
+        trusted = _trusted_result_for_trace(get_conversation_store(), user, req.conversation_id, req.trace_id)
+        answer = trusted["answer"]
+        narrative = str(answer.get("narrative") or "")
+        highlights = [str(h) for h in (answer.get("highlights") or []) if str(h).strip()][:10]
+        table = answer.get("table") if isinstance(answer.get("table"), dict) else {}
+        display_rows = table.get("display_rows") or table.get("rows") or []
+        rows_preview = [
+            " | ".join(str(c) for c in row)
+            for row in display_rows[:5] if isinstance(row, (list, tuple))
+        ]
+        title = (trusted["question"] or "").strip()[:30] or "飞鹤小Q · 经营分析"
+
+        # 安全（P0）：记录后端实际推送内容的指纹（sha256），便于审计追溯 / 防篡改取证。
+        content_sha256 = _hashlib.sha256(
+            "\n".join([narrative, *highlights, *rows_preview]).encode("utf-8")
+        ).hexdigest()
+
         # 安全（P1）：禁止请求体指定任意 webhook/url（SSRF / 内网探测）。
         # 推送目标只允许：服务端配置的 webhook，或按"用户邮箱→open_id"个人推送。
         #
@@ -1105,12 +1010,14 @@ def create_app() -> FastAPI:
             target_email = (req.user_email or "").strip() or None
         else:
             target_email = (user.email or "").strip() or None
+        logger.info("[trace=%s chat_trace=%s user=%s] feishu push content_sha256=%s to=%s",
+                    trace_id, req.trace_id, user.username, content_sha256, target_email or "(webhook)")
         try:
             res = feishu_push(
-                req.title, req.narrative, req.highlights, req.rows_preview,
+                title, narrative, highlights, rows_preview,
                 user_email=target_email, webhook=None, url=None,
             )
-            return {"ok": True, "trace_id": trace_id}
+            return {"ok": True, "trace_id": trace_id, "content_sha256": content_sha256}
         except FeishuError as exc:
             # 真实异常（含底层网络错误）只进日志，绝不回传用户侧
             logger.warning("[trace=%s user=%s] feishu push failed: %s", trace_id, user.username, exc)
@@ -1129,6 +1036,8 @@ def create_app() -> FastAPI:
     def api_report(req: ReportRequest = Body(...), user: User = Depends(require_user)):
         backend_root = Path(__file__).resolve().parent.parent
         out_dir = backend_root / "reports" / "generated"
+        # 安全（P0）：报告内容从会话存储按 trace 取可信结果，不信任前端 payload。
+        trusted = _trusted_result_for_trace(get_conversation_store(), user, req.conversation_id, req.trace_id)
         store = get_report_template_store()
         # 模板归属校验：admin 通用；普通用户只能用系统模板或自己的
         tpl = store.get(req.template_id) if req.template_id else None
@@ -1140,7 +1049,7 @@ def create_app() -> FastAPI:
         name = tpl.name if tpl else "标准商业分析报告"
         try:
             path = generate_report(
-                req.question, req.answer, req.plan, req.sql,
+                trusted["question"], trusted["answer"], trusted["plan"], trusted["sql"],
                 output_dir=out_dir, template_prompt=prompt, template_name=name,
             )
         except Exception as exc:
@@ -1313,7 +1222,43 @@ def _user_dict(u: User) -> dict[str, Any]:
         "id": u.id, "username": u.username, "role": u.role, "created_at": u.created_at,
         "email": u.email or "",
         "must_change_password": bool(u.must_change_password),
+        "is_active": bool(getattr(u, "is_active", True)),
     }
+
+
+def _trusted_result_for_trace(store, user: User, conversation_id: str, trace_id: str) -> dict[str, Any]:
+    """按 (conversation_id, trace_id) 从会话存储取回**服务端可信**的问数结果。
+
+    安全（P0）：报告生成 / 飞书推送绝不信任前端传入的 question/answer/plan/sql/narrative，
+    一律以服务端落地的 assistant 消息为准，杜绝伪造内容。
+    校验会话归属（user_id 必须匹配），缺参 → 400，找不到 / 越权一律 404（不泄露存在性）。
+    返回 {question, answer, plan, sql}。
+    """
+    conversation_id = (conversation_id or "").strip()
+    trace_id = (trace_id or "").strip()
+    if not conversation_id or not trace_id:
+        raise HTTPException(status_code=400, detail="缺少 conversation_id 或 trace_id")
+    sess = store.get_session(conversation_id)
+    if not sess or sess.user_id != user.id:
+        raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+    msgs = store.list_messages(conversation_id, limit=500)
+    for i, m in enumerate(msgs):
+        if m.role == "assistant" and str((m.payload or {}).get("trace_id") or "") == trace_id:
+            payload = m.payload or {}
+            question = ""
+            for prev in reversed(msgs[:i]):
+                if prev.role == "user":
+                    question = prev.content
+                    break
+            answer = payload.get("answer")
+            plan = payload.get("plan")
+            return {
+                "question": question,
+                "answer": answer if isinstance(answer, dict) else {},
+                "plan": plan if isinstance(plan, dict) else {},
+                "sql": str(payload.get("sql") or ""),
+            }
+    raise HTTPException(status_code=404, detail="未找到该回答（trace_id 无效或结果已过期）")
 
 
 def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=None) -> dict[str, Any]:
@@ -1478,6 +1423,30 @@ def _simple_event(stage: str, status: str, payload: dict[str, Any]):
 def _get_env(name: str) -> str:
     import os
     return (os.environ.get(name) or "").strip()
+
+
+def _ip_is_local_or_private(ip: str) -> bool:
+    """回环 / 内网 IP 判定（nginx 同机反代时 client 即 127.0.0.1）。"""
+    if not ip:
+        return False
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return addr.is_loopback or addr.is_private
+
+
+def _metrics_access_allowed(*, is_local: bool, client_ip: str, auth_header: str, token: str) -> bool:
+    """/metrics 访问控制（P1）：
+      · 本地/开发：放开，方便调试；
+      · 生产：仅允许 localhost / 内网 IP，或携带正确的 METRICS_TOKEN（Bearer）。
+    Prometheus 抓取一般来自同机 nginx（127.0.0.1）或内网，天然满足；公网直连被拒。"""
+    if is_local:
+        return True
+    if token and auth_header.strip() == f"Bearer {token}":
+        return True
+    return _ip_is_local_or_private(client_ip)
 
 
 app = create_app()

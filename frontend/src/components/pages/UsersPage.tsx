@@ -64,6 +64,12 @@ export function UsersPage() {
     try { await api.deleteUser(u.username); await refresh(); }
     catch (e: any) { alert("失败: " + (e?.message || e)); }
   }
+  async function toggleActive(u: AuthUser) {
+    const next = !(u.is_active ?? true);
+    if (!next && !confirm(`确定停用 ${u.username}？停用后该用户立即无法登录、现有会话立即失效。`)) return;
+    try { await api.setUserActive(u.username, next); await refresh(); }
+    catch (e: any) { alert("失败: " + (e?.message || e)); }
+  }
 
   return (
     <div className="mx-auto max-w-5xl space-y-4 px-6 py-6">
@@ -131,7 +137,7 @@ export function UsersPage() {
         {!loading && (
           <table className="qq-table">
             <thead>
-              <tr><th>用户名</th><th>角色</th><th>飞书邮箱</th><th>创建时间</th><th className="w-44">操作</th></tr>
+              <tr><th>用户名</th><th>角色</th><th>飞书邮箱</th><th>创建时间</th><th>状态</th><th className="w-56">操作</th></tr>
             </thead>
             <tbody>
               {filtered.map((u) => (
@@ -154,7 +160,17 @@ export function UsersPage() {
                     {u.created_at ? new Date(u.created_at * 1000).toLocaleString() : "—"}
                   </td>
                   <td>
+                    {(u.is_active ?? true)
+                      ? <span className="qq-pill-grey">启用</span>
+                      : <span className="qq-pill-amber" title="已停用，无法登录">已停用</span>}
+                  </td>
+                  <td>
                     <button onClick={() => resetPwd(u)} className="mr-2 text-xs text-blue-600 hover:underline">重置密码</button>
+                    {u.username !== "admin" && (
+                      <button onClick={() => toggleActive(u)} className="mr-2 text-xs text-amber-600 hover:underline">
+                        {(u.is_active ?? true) ? "停用" : "启用"}
+                      </button>
+                    )}
                     {u.username !== "admin" && (
                       <button onClick={() => remove(u)} className="text-xs text-rose-600 hover:underline">删除</button>
                     )}
@@ -162,7 +178,7 @@ export function UsersPage() {
                 </tr>
               ))}
               {filtered.length === 0 && (
-                <tr><td colSpan={4} className="px-5 py-8 text-center text-xs text-slate-400">无匹配账号</td></tr>
+                <tr><td colSpan={6} className="px-5 py-8 text-center text-xs text-slate-400">无匹配账号</td></tr>
               )}
             </tbody>
           </table>

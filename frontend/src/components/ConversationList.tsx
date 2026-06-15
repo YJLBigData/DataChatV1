@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api";
+import { ConfirmDialog, PromptDialog } from "./Modal";
 import type { ConversationMeta, Folder } from "../types";
+
+/** 当前打开的对话框（统一 Modal，替代原生 prompt/confirm）。 */
+type Dialog =
+  | { kind: "create-folder" }
+  | { kind: "rename-folder"; folder: Folder }
+  | { kind: "delete-folder"; folder: Folder }
+  | { kind: "rename-conv"; conv: ConversationMeta }
+  | { kind: "delete-conv"; conv: ConversationMeta };
 
 interface Props {
   items: ConversationMeta[];
@@ -37,6 +46,7 @@ export function ConversationList({ items, activeId, onPick, onNew, onRename, onD
   const [folderConversations, setFolderConversations] = useState<ConversationMeta[]>([]);
   const [collectFor, setCollectFor] = useState<ConversationMeta | null>(null);
   const [newFolderName, setNewFolderName] = useState("");
+  const [dialog, setDialog] = useState<Dialog | null>(null);
 
   async function refreshFolders() {
     try {
@@ -76,27 +86,27 @@ export function ConversationList({ items, activeId, onPick, onNew, onRename, onD
     return items;
   }, [activeFolderId, folderConversations, items]);
 
-  async function createFolder() {
-    const name = newFolderName.trim() || prompt("新文件夹名");
-    if (!name) return;
+  // 文件夹增删改：用统一 Modal（见底部 dialog 渲染），不再用原生 prompt/confirm。
+  function createFolder() {
+    const name = newFolderName.trim();
+    if (name) { void doCreateFolder(name); } else { setDialog({ kind: "create-folder" }); }
+  }
+  async function doCreateFolder(name: string) {
     try {
       await api.createFolder(name);
       setNewFolderName("");
       await refreshFolders();
     } catch (e: any) { alert("失败：" + (e?.message || e)); }
   }
-  async function deleteFolder(f: Folder) {
-    if (!confirm(`删除文件夹「${f.name}」？（不删除原会话）`)) return;
+  async function doDeleteFolder(f: Folder) {
     try {
       await api.deleteFolder(f.id);
       if (activeFolderId === f.id) setActiveFolderId(null);
       await refreshFolders();
     } catch (e: any) { alert("失败：" + (e?.message || e)); }
   }
-  async function renameFolder(f: Folder) {
-    const n = prompt("文件夹名", f.name);
-    if (!n || !n.trim()) return;
-    try { await api.renameFolder(f.id, n.trim()); await refreshFolders(); }
+  async function doRenameFolder(f: Folder, name: string) {
+    try { await api.renameFolder(f.id, name); await refreshFolders(); }
     catch (e: any) { alert("失败：" + (e?.message || e)); }
   }
 
@@ -133,8 +143,8 @@ export function ConversationList({ items, activeId, onPick, onNew, onRename, onD
               label={f.name}
               active={activeFolderId === f.id}
               onClick={()=>setActiveFolderId(f.id)}
-              onRename={()=>renameFolder(f)}
-              onDelete={()=>deleteFolder(f)}
+              onRename={()=>setDialog({ kind: "rename-folder", folder: f })}
+              onDelete={()=>setDialog({ kind: "delete-folder", folder: f })}
             />
           ))}
         </div>
@@ -182,20 +192,13 @@ export function ConversationList({ items, activeId, onPick, onNew, onRename, onD
                     className="rounded border px-1.5 py-0.5 text-[10px] text-slate-500 hover:border-blue-200 hover:text-blue-600"
                     style={{ borderColor: "#e6ecf6" }}
                     title="重命名会话"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      const t = prompt("重命名会话", it.title) || "";
-                      if (t.trim()) onRename(it.id, t.trim());
-                    }}
+                    onClick={(e) => { e.stopPropagation(); setDialog({ kind: "rename-conv", conv: it }); }}
                   >重命名</button>
                   <button
                     className="rounded border px-1.5 py-0.5 text-[10px] text-slate-500 hover:border-rose-200 hover:text-rose-600"
                     style={{ borderColor: "#e6ecf6" }}
                     title="删除会话"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (confirm(`确认删除会话「${it.title}」？`)) onDelete(it.id);
-                    }}
+                    onClick={(e) => { e.stopPropagation(); setDialog({ kind: "delete-conv", conv: it }); }}
                   >删除</button>
                 </div>
               </div>
@@ -220,6 +223,42 @@ export function ConversationList({ items, activeId, onPick, onNew, onRename, onD
           }}
         />
       )}
+
+      {/* 统一对话框（替代原生 prompt/confirm） */}
+      <PromptDialog
+        open={dialog?.kind === "create-folder"}
+        title="新建文件夹" label="文件夹名" placeholder="如：经营月报" confirmText="创建"
+        onSubmit={(v) => { setDialog(null); void doCreateFolder(v); }}
+        onCancel={() => setDialog(null)}
+      />
+      <PromptDialog
+        open={dialog?.kind === "rename-folder"}
+        title="重命名文件夹" label="文件夹名"
+        defaultValue={dialog?.kind === "rename-folder" ? dialog.folder.name : ""}
+        onSubmit={(v) => { const d = dialog; setDialog(null); if (d?.kind === "rename-folder") void doRenameFolder(d.folder, v); }}
+        onCancel={() => setDialog(null)}
+      />
+      <ConfirmDialog
+        open={dialog?.kind === "delete-folder"}
+        title="删除文件夹" danger confirmText="删除"
+        message={dialog?.kind === "delete-folder" ? `删除文件夹「${dialog.folder.name}」？（不删除原会话）` : ""}
+        onConfirm={() => { const d = dialog; setDialog(null); if (d?.kind === "delete-folder") void doDeleteFolder(d.folder); }}
+        onCancel={() => setDialog(null)}
+      />
+      <PromptDialog
+        open={dialog?.kind === "rename-conv"}
+        title="重命名会话" label="会话名称"
+        defaultValue={dialog?.kind === "rename-conv" ? (dialog.conv.title || "") : ""}
+        onSubmit={(v) => { const d = dialog; setDialog(null); if (d?.kind === "rename-conv") onRename(d.conv.id, v); }}
+        onCancel={() => setDialog(null)}
+      />
+      <ConfirmDialog
+        open={dialog?.kind === "delete-conv"}
+        title="删除会话" danger confirmText="删除"
+        message={dialog?.kind === "delete-conv" ? `确认删除会话「${dialog.conv.title || "新会话"}」？` : ""}
+        onConfirm={() => { const d = dialog; setDialog(null); if (d?.kind === "delete-conv") onDelete(d.conv.id); }}
+        onCancel={() => setDialog(null)}
+      />
     </aside>
   );
 }
@@ -235,8 +274,8 @@ function FolderChip({ label, active, onClick, onRename, onDelete }: {
       </button>
       {(onRename || onDelete) && (
         <div className="absolute right-0 top-full z-10 mt-1 hidden gap-1 rounded-md bg-white px-1 py-1 text-[10px] shadow-md group-hover:flex" style={{ border: "1px solid #eef1f8" }}>
-          {onRename && <button onClick={onRename} className="px-1.5 py-0.5 text-slate-500 hover:text-blue-600">Rename</button>}
-          {onDelete && <button onClick={onDelete} className="px-1.5 py-0.5 text-slate-500 hover:text-rose-600">Delete</button>}
+          {onRename && <button onClick={onRename} className="px-1.5 py-0.5 text-slate-500 hover:text-blue-600">重命名</button>}
+          {onDelete && <button onClick={onDelete} className="px-1.5 py-0.5 text-slate-500 hover:text-rose-600">删除</button>}
         </div>
       )}
     </div>

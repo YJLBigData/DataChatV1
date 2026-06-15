@@ -339,6 +339,21 @@ class CompanyAuthStore:
         with self.engine.begin() as conn:
             conn.execute(text(f"DELETE FROM {self.table} WHERE username = :u"), {"u": username})
 
+    def set_active(self, username: str, is_active: bool) -> None:
+        """启用/停用账号。停用后该用户无法登录、verify_token 立即拒绝。"""
+        from sqlalchemy import text
+
+        username = username.strip().lower()
+        if username == DEFAULT_ADMIN_USERNAME and not is_active:
+            raise AuthError("不能停用默认管理员")
+        with self.engine.begin() as conn:
+            res = conn.execute(
+                text(f"UPDATE {self.table} SET is_active = :a WHERE username = :u"),
+                {"a": 1 if is_active else 0, "u": username},
+            )
+            if res.rowcount == 0:
+                raise AuthError(f"用户不存在: {username}")
+
     def set_email(self, username: str, email: str) -> None:
         from sqlalchemy import text
 

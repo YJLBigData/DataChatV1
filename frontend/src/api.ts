@@ -143,6 +143,11 @@ export const api = {
     }),
   deleteUser: (username: string) =>
     jsonReq<{ ok: boolean }>(`/api/admin/users/${encodeURIComponent(username)}`, { method: "DELETE" }),
+  setUserActive: (username: string, is_active: boolean) =>
+    jsonReq<{ ok: boolean; username: string; is_active: boolean }>(
+      `/api/admin/users/${encodeURIComponent(username)}/active`,
+      { method: "POST", body: JSON.stringify({ is_active }) },
+    ),
   resetPassword: (username: string, new_password: string | null = null, must_change_password: boolean = true) =>
     jsonReq<{ ok: boolean; one_time_password?: string }>(
       `/api/admin/users/${encodeURIComponent(username)}/password`,
@@ -175,6 +180,21 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ content }),
     }),
+  // #15：保存前校验（dry-run）/ 历史版本 / 回滚
+  semanticValidate: (content: string) =>
+    jsonReq<{ ok: boolean; errors: string[]; summary: Record<string, number> }>("/api/admin/semantic/validate", {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
+  semanticVersions: () =>
+    jsonReq<{ items: { id: string; bytes: number; mtime: number }[] }>("/api/admin/semantic/versions"),
+  semanticVersionContent: (vid: string) =>
+    jsonReq<{ id: string; content: string }>(`/api/admin/semantic/versions/${encodeURIComponent(vid)}`),
+  semanticRollback: (vid: string) =>
+    jsonReq<{ ok: boolean; metrics: number; dimensions: number; tables: number; rolled_back_to: string }>(
+      `/api/admin/semantic/rollback/${encodeURIComponent(vid)}`,
+      { method: "POST" },
+    ),
 
   /* ---------- 数据权限（admin） ---------- */
   listPermissions: () => jsonReq<{ items: PermissionsAllItem[] }>("/api/admin/permissions"),
@@ -309,6 +329,7 @@ export const api = {
     base_url?: string;
     model: string;
     prompt?: string;
+    preset_id?: string;   // 编辑时"旧 AK + 当前草稿字段"合并测试用
   }) =>
     jsonReq<import("./types").LLMPresetTestResult>("/api/admin/llm-presets/test", {
       method: "POST",
@@ -352,14 +373,14 @@ export const api = {
     jsonReq<import("./types").LLMPresetTestResult>(`/api/admin/llm-presets/${encodeURIComponent(id)}/test`, { method: "POST" }),
 
   /* ---------- 飞书 ---------- */
+  // 安全（P0）：推送内容由后端按 trace 取可信结果生成，前端仅传定位用的
+  // conversation_id / trace_id（admin 可附带收件邮箱）。不再传任何经营文案。
   feishuPush: (req: {
-    title: string;
-    narrative: string;
-    highlights: string[];
-    rows_preview: string[];
+    conversation_id: string;
+    trace_id: string;
     user_email?: string;
   }) =>
-    jsonReq<{ ok: boolean; error_code?: string; user_message?: string; trace_id?: string }>(
+    jsonReq<{ ok: boolean; error_code?: string; user_message?: string; trace_id?: string; content_sha256?: string }>(
       "/api/feishu/push",
       { method: "POST", body: JSON.stringify(req) },
     ),
