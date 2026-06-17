@@ -131,6 +131,46 @@ def test_safe_json_parse_handles_feihe_agent_styles():
     assert _safe_json_parse("") is None
 
 
+def test_feihe_gateway_accepts_legacy_llm_env_aliases(monkeypatch):
+    """线上历史 .env 可能使用 FEIHE_LLM_*，网关必须兼容且不联网。"""
+    keys = [
+        "FEIHE_AGENT_API_URL", "FEIHE_LLM_BASE_URL",
+        "FEIHE_SERVICE_OPEN_ID", "FEIHE_LLM_SERVICE_OPEN_ID",
+        "FEIHE_AUTHENTICATOR", "FEIHE_LLM_AUTHENTICATOR",
+        "FEIHE_AGENT_CODE", "FEIHE_LLM_AGENT_CODE",
+        "FEIHE_TENANT_CODE", "FEIHE_LLM_TENANT_CODE",
+        "FEIHE_CHANNEL", "FEIHE_LLM_CHANNEL",
+        "FEIHE_AGENT_DEBUG", "FEIHE_LLM_DEBUG",
+        "AES_KEY", "FEIHE_LLM_AES_KEY",
+    ]
+    for key in keys:
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setenv("FEIHE_LLM_BASE_URL", "http://127.0.0.1:18000/agent/chat")
+    monkeypatch.setenv("FEIHE_LLM_SERVICE_OPEN_ID", "svc_legacy")
+    monkeypatch.setenv("FEIHE_LLM_AUTHENTICATOR", "AES")
+    monkeypatch.setenv("FEIHE_LLM_AGENT_CODE", "legacy_agent")
+    monkeypatch.setenv("FEIHE_LLM_TENANT_CODE", "legacy_tenant")
+    monkeypatch.setenv("FEIHE_LLM_CHANNEL", "legacy_channel")
+    monkeypatch.setenv("FEIHE_LLM_DEBUG", "false")
+    monkeypatch.setenv("FEIHE_LLM_AES_KEY", "MTIzNDU2Nzg5MGFiY2RlZg==")
+
+    from app.core.llm.feihe_gateway import FeiheGatewayClient
+
+    client = FeiheGatewayClient()
+    try:
+        assert client.configured is True
+        assert client.api_url == "http://127.0.0.1:18000/agent/chat"
+        assert client.service_open_id == "svc_legacy"
+        assert client.agent_code == "legacy_agent"
+        assert client.tenant_code == "legacy_tenant"
+        assert client.channel == "legacy_channel"
+        assert client.debug is False
+        assert client.aes_key == "MTIzNDU2Nzg5MGFiY2RlZg=="
+    finally:
+        client._client.close()
+
+
 def test_retrieval_index_load_persist_roundtrip(cfg, tmp_path, monkeypatch):
     """retrieval_index/ 持久化往返：构建 → 落盘 → 重新加载，不联网。
 

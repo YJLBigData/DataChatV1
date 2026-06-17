@@ -54,20 +54,48 @@ def _mask(secret: str) -> str:
     return f"len={len(secret)} prefix={secret[:2]}***"
 
 
+def _env_first(*names: str, default: str = "") -> str:
+    """Return the first non-empty env value, supporting old and canonical names."""
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None and value.strip():
+            return value.strip()
+    return default
+
+
+def _is_placeholder(value: str) -> bool:
+    v = (value or "").strip()
+    if not v:
+        return True
+    low = v.lower()
+    return (
+        v.startswith("PLEASE_REPLACE")
+        or "请填写" in v
+        or "请部署" in v
+        or low in {"changeme", "change-me", "none", "null"}
+    )
+
+
 class FeiheGatewayClient:
     """公司统一模型网关 chat 客户端。密钥仅来自环境变量。"""
 
     def __init__(self, *, timeout_seconds: int = 180, connect_timeout_seconds: int = 10):
-        self.api_url = os.environ.get(
-            "FEIHE_AGENT_API_URL", "https://adp-test.feihe.com/adp-engine/v1/agent/chat"
+        self.api_url = _env_first(
+            "FEIHE_AGENT_API_URL",
+            "FEIHE_LLM_BASE_URL",
+            default="https://adp-test.feihe.com/adp-engine/v1/agent/chat",
         )
-        self.service_open_id = os.environ.get("FEIHE_SERVICE_OPEN_ID", "data_middle_platform")
-        self.authenticator = os.environ.get("FEIHE_AUTHENTICATOR", "AES")
-        self.agent_code = os.environ.get("FEIHE_AGENT_CODE", "kaier_znws")
-        self.tenant_code = os.environ.get("FEIHE_TENANT_CODE", "data_middle_platform")
-        self.channel = os.environ.get("FEIHE_CHANNEL", "d2b-order")
-        self.debug = (os.environ.get("FEIHE_AGENT_DEBUG", "true").strip().lower() != "false")
-        self.aes_key = os.environ.get("AES_KEY", "")
+        self.service_open_id = _env_first(
+            "FEIHE_SERVICE_OPEN_ID", "FEIHE_LLM_SERVICE_OPEN_ID", default="data_middle_platform"
+        )
+        self.authenticator = _env_first("FEIHE_AUTHENTICATOR", "FEIHE_LLM_AUTHENTICATOR", default="AES")
+        self.agent_code = _env_first("FEIHE_AGENT_CODE", "FEIHE_LLM_AGENT_CODE", default="kaier_znws")
+        self.tenant_code = _env_first(
+            "FEIHE_TENANT_CODE", "FEIHE_LLM_TENANT_CODE", default="data_middle_platform"
+        )
+        self.channel = _env_first("FEIHE_CHANNEL", "FEIHE_LLM_CHANNEL", default="d2b-order")
+        self.debug = (_env_first("FEIHE_AGENT_DEBUG", "FEIHE_LLM_DEBUG", default="true").lower() != "false")
+        self.aes_key = _env_first("AES_KEY", "FEIHE_LLM_AES_KEY")
         self._client = httpx.Client(
             timeout=httpx.Timeout(
                 connect=float(connect_timeout_seconds), read=float(timeout_seconds),
@@ -77,7 +105,7 @@ class FeiheGatewayClient:
 
     @property
     def configured(self) -> bool:
-        return bool(self.api_url and self.aes_key and self.aes_key != "PLEASE_REPLACE_AES_KEY")
+        return bool(self.api_url and not _is_placeholder(self.aes_key))
 
     def chat(self, prompt: str, *, uid: str = "system", customer_id: str = "system",
              trace_id: Optional[str] = None) -> tuple[str, Any]:
