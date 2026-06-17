@@ -309,13 +309,28 @@ export const api = {
       method: "POST",
       body: JSON.stringify(req),
     }),
+  // 成员（内置专家 + 自建 skill）统一增删改查
+  expertTeamGetMember: (id: string) =>
+    jsonReq<{ ok: boolean; error?: string; member?: import("./types").ExpertMemberDetail }>(
+      `/api/expert-team/members/${encodeURIComponent(id)}`,
+    ),
   expertTeamCreateSkill: (req: { name: string; profession?: string; instructions?: string; emoji?: string }) =>
-    jsonReq<{ ok: boolean; error?: string; skill?: import("./types").ExpertCard }>("/api/expert-team/skills", {
+    jsonReq<{ ok: boolean; error?: string; member?: import("./types").ExpertMemberDetail }>("/api/expert-team/skills", {
       method: "POST",
       body: JSON.stringify(req),
     }),
-  expertTeamDeleteSkill: (id: string) =>
-    jsonReq<{ ok: boolean }>(`/api/expert-team/skills/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  expertTeamUpdateMember: (id: string, patch: { name?: string; profession?: string; instructions?: string; emoji?: string }) =>
+    jsonReq<{ ok: boolean; error?: string; member?: import("./types").ExpertMemberDetail }>(
+      `/api/expert-team/members/${encodeURIComponent(id)}`,
+      { method: "PATCH", body: JSON.stringify(patch) },
+    ),
+  expertTeamDeleteMember: (id: string) =>
+    jsonReq<{ ok: boolean; error?: string; hidden?: boolean }>(`/api/expert-team/members/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  expertTeamResetMember: (id: string) =>
+    jsonReq<{ ok: boolean; error?: string; member?: import("./types").ExpertMemberDetail }>(
+      `/api/expert-team/members/${encodeURIComponent(id)}/reset`,
+      { method: "POST" },
+    ),
 
   /* ---------- LLM 模型 ---------- */
   listLLMProviders: () =>

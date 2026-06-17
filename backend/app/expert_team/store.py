@@ -82,6 +82,17 @@ class ExpertTeamStore:
                     created_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_team_run_user ON team_run_v1(user_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS expert_override_v1 (
+                    user_id TEXT NOT NULL,
+                    expert_id TEXT NOT NULL,
+                    name TEXT,
+                    profession TEXT,
+                    instructions TEXT,
+                    emoji TEXT,
+                    deleted INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (user_id, expert_id)
+                );
                 """
             )
 
@@ -151,6 +162,69 @@ class ExpertTeamStore:
             instructions=r["instructions"], emoji=r["emoji"],
             created_at=r["created_at"], updated_at=r["updated_at"],
         )
+
+    # --------------------------------------------------- builtin overrides
+
+    def upsert_override(self, user_id: str, expert_id: str, *, name: str | None = None,
+                        profession: str | None = None, instructions: str | None = None,
+                        emoji: str | None = None, deleted: bool | None = None) -> dict[str, Any]:
+        """对内置专家做"改/删（隐藏）"覆盖。只更新给定字段，其余沿用既有覆盖值。
+        不改动磁盘上的定义文件——所有定制都落库，可随时 clear_override 还原默认。"""
+        cur = self.get_override(user_id, expert_id) or {}
+        merged = {
+            "name": (name if name is not None else cur.get("name")),
+            "profession": (profession if profession is not None else cur.get("profession")),
+            "instructions": (instructions if instructions is not None else cur.get("instructions")),
+            "emoji": (emoji if emoji is not None else cur.get("emoji")),
+            "deleted": (1 if deleted else 0) if deleted is not None else int(cur.get("deleted") or 0),
+        }
+        for k in ("name", "profession", "emoji"):
+            if merged[k] is not None:
+                merged[k] = str(merged[k]).strip()[:40]
+        if merged["instructions"] is not None:
+            merged["instructions"] = str(merged["instructions"]).strip()[:8000]
+        with self._lock, self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO expert_override_v1"
+                "(user_id,expert_id,name,profession,instructions,emoji,deleted,updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (user_id, expert_id, merged["name"], merged["profession"], merged["instructions"],
+                 merged["emoji"], merged["deleted"], time.time()),
+            )
+        return merged
+
+    def get_override(self, user_id: str, expert_id: str) -> dict[str, Any] | None:
+        with self._lock, self._conn() as c:
+            r = c.execute(
+                "SELECT * FROM expert_override_v1 WHERE user_id=? AND expert_id=?",
+                (user_id, expert_id),
+            ).fetchone()
+        if not r:
+            return None
+        return {
+            "name": r["name"], "profession": r["profession"], "instructions": r["instructions"],
+            "emoji": r["emoji"], "deleted": int(r["deleted"] or 0),
+        }
+
+    def list_overrides(self, user_id: str) -> dict[str, dict[str, Any]]:
+        with self._lock, self._conn() as c:
+            rows = c.execute("SELECT * FROM expert_override_v1 WHERE user_id=?", (user_id,)).fetchall()
+        return {
+            r["expert_id"]: {
+                "name": r["name"], "profession": r["profession"], "instructions": r["instructions"],
+                "emoji": r["emoji"], "deleted": int(r["deleted"] or 0),
+            }
+            for r in rows
+        }
+
+    def clear_override(self, user_id: str, expert_id: str) -> bool:
+        """删除覆盖 = 把内置专家还原成出厂默认（含取消隐藏）。"""
+        with self._lock, self._conn() as c:
+            cur = c.execute(
+                "DELETE FROM expert_override_v1 WHERE user_id=? AND expert_id=?",
+                (user_id, expert_id),
+            )
+            return cur.rowcount > 0
 
     # -------------------------------------------------------------- run log
 

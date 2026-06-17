@@ -85,6 +85,47 @@ def test_fallback_route_keyword_and_fast():
     assert fr2["experts"] and fr2["experts"][0]["id"] == "data-query-analyst"
 
 
+def test_builtin_override_edit_hide_reset():
+    """内置专家也支持增删改查：改→写覆盖，删→隐藏（软删），还原→清覆盖。"""
+    from app.expert_team.members import list_members, member_detail
+    from app.expert_team.store import ExpertTeamStore
+    import app.expert_team.store as store_mod
+    st = ExpertTeamStore("/tmp/datachat_test_expert_override.db")
+    store_mod._store_singleton = st  # members.py 用 get_expert_store() 取单例
+    U = "ov_user"
+    n0 = len(list_members(U))
+    assert n0 >= 8
+    # 改
+    st.upsert_override(U, "sales-analyst", name="销冠分析师", instructions="只做量价分解")
+    d = member_detail(U, "sales-analyst")
+    assert d["name"] == "销冠分析师" and d["has_override"] is True
+    assert d["instructions"].startswith("只做量价") and d["default"]["name"] == "齐增辉"
+    # 删（隐藏）
+    st.upsert_override(U, "channel-analyst", deleted=True)
+    assert "channel-analyst" not in {m["id"] for m in list_members(U)}
+    assert len(list_members(U)) == n0 - 1
+    # 还原
+    assert st.clear_override(U, "sales-analyst") is True
+    st.clear_override(U, "channel-analyst")
+    assert member_detail(U, "sales-analyst")["name"] == "齐增辉"
+    assert len(list_members(U)) == n0
+    store_mod._store_singleton = None  # 不污染其它测试
+
+
+def test_pool_respects_overrides():
+    """编排池应用覆盖：隐藏的内置专家不进池，改名的按覆盖名进池。"""
+    o = ExpertTeamOrchestrator()
+    overrides = {
+        "channel-analyst": {"deleted": 1},
+        "sales-analyst": {"name": "销冠", "deleted": 0},
+    }
+    pool = o._build_pool(None, overrides)
+    ids = {p.id for p in pool}
+    assert "channel-analyst" not in ids
+    sales = next(p for p in pool if p.id == "sales-analyst")
+    assert sales.name == "销冠"
+
+
 def test_table_preview_compact():
     table = {
         "display_columns": [{"label": "省区"}, {"label": "达成率"}],

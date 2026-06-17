@@ -61,6 +61,7 @@ class ExpertTeamOrchestrator:
         is_admin: bool = False,
         selected_expert_ids: list[str] | None = None,
         user_skills: list[dict[str, Any]] | None = None,
+        overrides: dict[str, dict[str, Any]] | None = None,
         want_report: bool = False,
         history: list[dict[str, str]] | None = None,
         on_event: EventSink = None,
@@ -79,8 +80,9 @@ class ExpertTeamOrchestrator:
         if not question:
             return {"ok": False, "error": "请输入问题。", "report": "请输入问题。", "experts": [], "plan": "", "route": ""}
 
-        # 可用专家池 = 内置 worker + 用户自建 skill；按用户勾选过滤（空 = 全部，由总监自主挑）
-        pool = self._build_pool(user_skills)
+        # 可用专家池 = 内置 worker（应用用户覆盖、剔除隐藏）+ 用户自建 skill；
+        # 按用户勾选过滤（空 = 全部，由总监自主挑）
+        pool = self._build_pool(user_skills, overrides)
         selected = set(selected_expert_ids or [])
         candidates = [p for p in pool if (not selected or p.id in selected)]
         if not candidates:
@@ -149,12 +151,24 @@ class ExpertTeamOrchestrator:
 
     # ----------------------------------------------------------- pool build
 
-    def _build_pool(self, user_skills: list[dict[str, Any]] | None) -> list[_Participant]:
+    def _build_pool(self, user_skills: list[dict[str, Any]] | None,
+                    overrides: dict[str, dict[str, Any]] | None = None) -> list[_Participant]:
+        overrides = overrides or {}
         pool: list[_Participant] = []
         for e in self.registry.workers():
+            ov = overrides.get(e.id) or {}
+            if ov.get("deleted"):
+                continue  # 用户已隐藏该内置专家
+            def _ov(key: str, default: str) -> str:
+                v = ov.get(key)
+                return str(v) if (v is not None and str(v).strip() != "") else default
             pool.append(_Participant(
-                id=e.id, name=e.name, profession=e.profession, emoji=e.emoji,
-                persona=e.persona, skill_ids=e.skill_ids, is_builtin=True,
+                id=e.id,
+                name=_ov("name", e.name),
+                profession=_ov("profession", e.profession),
+                emoji=_ov("emoji", e.emoji),
+                persona=_ov("instructions", e.persona),
+                skill_ids=e.skill_ids, is_builtin=True,
             ))
         for us in (user_skills or []):
             try:

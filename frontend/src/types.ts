@@ -247,6 +247,15 @@ export interface ExpertCard {
   skills: string[];
   is_director: boolean;
   is_builtin: boolean;
+  has_override?: boolean;
+  deletable?: boolean;
+  deleted?: boolean;
+}
+
+export interface ExpertMemberDetail extends ExpertCard {
+  instructions: string;
+  methodology?: string;
+  default?: { name: string; profession: string; emoji: string; instructions: string };
 }
 
 export interface ExpertWorkflow { name: string; trigger: string; flow: string }
