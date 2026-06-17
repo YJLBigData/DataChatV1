@@ -17,10 +17,19 @@ import yaml
 logger = logging.getLogger("datachat.semantic")
 
 
-def _norm_status(value: Any) -> str:
-    """认证状态归一化：只有显式 verified 算已认证，其余（含缺省/手误）一律 draft。
-    draft = 机器起草未经人工确认，planner 提示词里会标注出来。"""
-    return "verified" if str(value or "").strip().lower() == "verified" else "draft"
+def _norm_status(value: Any, default: str = "draft") -> str:
+    """认证状态归一化。
+
+    · 显式 verified / draft → 按字面；
+    · 缺省/手误 → 用 default（默认 draft）。
+    顶层 default_entity_status 可把"人工维护好的整份 semantic.yaml"统一视为已认证，
+    而通过 API 自动起草的新条目仍会显式写 draft，保留"机器起草→人工认证"工作流。"""
+    s = str(value or "").strip().lower()
+    if s == "verified":
+        return "verified"
+    if s == "draft":
+        return "draft"
+    return default if default in ("verified", "draft") else "draft"
 
 
 @dataclass
@@ -144,6 +153,8 @@ class SemanticLayer:
             self.version = int(data.get("version") or 1)
             self.profile = str(data.get("profile") or "default")
             self.default_time_grain = str(data.get("default_time_grain") or "month")
+            # 顶层 default_entity_status：未显式标 status 的条目统一按此认证状态加载。
+            self._default_status = "verified" if str(data.get("default_entity_status") or "").strip().lower() == "verified" else "draft"
             dr = data.get("data_range") or {}
             self.data_range_earliest = str(dr.get("earliest") or "")
             self.data_range_latest = str(dr.get("latest") or "")
@@ -305,7 +316,7 @@ class SemanticLayer:
                 primary_dimensions=list(body.get("primary_dimensions") or []),
                 measures=list(body.get("measures") or []),
                 notes=list(body.get("notes") or []),
-                status=_norm_status(body.get("status")),
+                status=_norm_status(body.get("status"), getattr(self, "_default_status", "draft")),
             )
 
     def _load_dimensions(self, raw: dict[str, Any]) -> None:
@@ -320,7 +331,7 @@ class SemanticLayer:
                 value_dict={str(k): str(v) for k, v in (body.get("value_dict") or {}).items()},
                 description=str(body.get("description") or "").strip(),
                 code_columns={str(k): str(v) for k, v in (body.get("code_column") or {}).items()},
-                status=_norm_status(body.get("status")),
+                status=_norm_status(body.get("status"), getattr(self, "_default_status", "draft")),
             )
 
     def _load_metrics(self, raw: dict[str, Any]) -> None:
@@ -340,7 +351,7 @@ class SemanticLayer:
                 domain=str(body.get("domain") or "general"),
                 typical_dimensions=list(body.get("typical_dimensions") or []),
                 typical_questions=list(body.get("typical_questions") or []),
-                status=_norm_status(body.get("status")),
+                status=_norm_status(body.get("status"), getattr(self, "_default_status", "draft")),
             )
 
     def _load_joins(self, raw: dict[str, Any]) -> None:

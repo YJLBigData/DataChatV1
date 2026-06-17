@@ -36,7 +36,9 @@ from app.core.auth import (
     JWT_TTL_HOURS,
     AuthError,
     User,
+    _token_cache,
     generate_initial_password,
+    invalidate_token_cache,
     is_password_strong,
     resolve_jwt_secret,
 )
@@ -338,6 +340,7 @@ class CompanyAuthStore:
             raise AuthError("不能删除默认管理员")
         with self.engine.begin() as conn:
             conn.execute(text(f"DELETE FROM {self.table} WHERE username = :u"), {"u": username})
+        invalidate_token_cache()
 
     def set_active(self, username: str, is_active: bool) -> None:
         """启用/停用账号。停用后该用户无法登录、verify_token 立即拒绝。"""
@@ -353,6 +356,7 @@ class CompanyAuthStore:
             )
             if res.rowcount == 0:
                 raise AuthError(f"用户不存在: {username}")
+        invalidate_token_cache()
 
     def set_email(self, username: str, email: str) -> None:
         from sqlalchemy import text
@@ -392,6 +396,7 @@ class CompanyAuthStore:
             )
             if res.rowcount == 0:
                 raise AuthError(f"用户不存在: {username}")
+        invalidate_token_cache()
 
     # JWT —— 与 SQLite 版一致；payload 含 user_id/username/display_name/role/
     # must_change_password，绝不含 password_hash 或任何密钥。
@@ -418,12 +423,16 @@ class CompanyAuthStore:
             raise AuthError("token 已过期，请重新登录")
         except jwt.InvalidTokenError:
             raise AuthError("token 无效")
+        cached = _token_cache.get(token)
+        if cached is not None:
+            return cached
         uid = str(payload.get("sub") or payload.get("user_id") or "")
         user = self.get_by_id(uid)
         if not user:
             raise AuthError("用户不存在")
         if not getattr(user, "is_active", True):
             raise AuthError("账号已停用，请联系管理员")
+        _token_cache.set(token, user)
         return user
 
 

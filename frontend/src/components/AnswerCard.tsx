@@ -1,11 +1,12 @@
-import { lazy, Suspense, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 
 import type { ChartMode, ChatTurn } from "../types";
 import { detectChartModes } from "../utils/chartDetect";
 import { ChartSwitcher } from "./ChartSwitcher";
 // 懒加载：echarts(chart-vendor ~1.1MB) 只在真正切到图表时才下载，
 // 默认"列表"视图首屏不再背负这块体积（P2 构建体积优化）。
-const EChartView = lazy(() => import("./EChartView").then((m) => ({ default: m.EChartView })));
+const importEChart = () => import("./EChartView").then((m) => ({ default: m.EChartView }));
+const EChartView = lazy(importEChart);
 import { KpiCards } from "./KpiCards";
 import { StagePill } from "./StagePill";
 import { TableView } from "./TableView";
@@ -43,6 +44,14 @@ export function AnswerCard({ turn, onPickSuggestion, onPickClarify, onPushFeishu
     () => detectChartModes(answer?.table as any, answer?.chart),
     [answer?.table, answer?.chart],
   );
+
+  // 预取图表渲染块：答案一旦含可切的图表，就后台把 echarts chunk 下好，
+  // 用户点开图表时即时渲染，不再卡在首次下载（"切换图表很慢"的主因）。
+  useEffect(() => {
+    if (modes.some((m) => m.enabled && m.id !== "table" && m.id !== "kpi")) {
+      importEChart();
+    }
+  }, [modes]);
 
   if (turn.error) {
     return (

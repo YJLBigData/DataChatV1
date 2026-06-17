@@ -21,6 +21,10 @@
 version: 2
 profile: chatbi
 default_time_grain: month
+# 这份 semantic.yaml 是按生产 6 张表逐字段人工建模并核对过的，整体视为"已认证"。
+# 未显式标 status 的表/维度/指标都按 verified 加载（planner 会优先信任，减少无谓澄清）；
+# 通过后台「自动分析」起草的新条目仍会显式写 status: draft，保留人工认证工作流。
+default_entity_status: verified
 data_range:
   earliest: "2025-01"
   latest: "2026-05"
@@ -594,6 +598,22 @@ metrics:
     domain: distribution
     typical_dimensions: [region, sub_region, city, big_system_channel, item_series, item_dan, terminal_circle]
 
+  avg_unit_price:
+    label: 件单价
+    aliases: [件单价, 单价, 客单价, 平均单价, 每件金额]
+    table: ads_bi_hs_sale_info_df
+    expression: "SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_qty), 0)"
+    unit: 元
+    display_format: currency_cn
+    decimals: 2
+    higher_is_better: true
+    domain: sales
+    description: 门店销售金额 / 门店销售件数，反映平均成交价格。
+    typical_dimensions: [region, sub_region, city, channel_type, item_series, item_stage, item]
+    typical_questions:
+      - 各大区件单价对比
+      - 哪个系列件单价最高
+
   # ===== 目标与达成率 =====
   shop_sale_target_total:
     label: 门店销售目标
@@ -604,6 +624,10 @@ metrics:
     display_format: currency_cn
     domain: target
     description: 月度下达的门店销售目标。
+    typical_dimensions: [region, sub_region, big_system_channel]
+    typical_questions:
+      - 各大区销售目标完成情况
+      - 本月销售目标是多少
 
   shop_sale_amount_actual_total:
     label: 门店销售实绩（目标表口径）
@@ -666,6 +690,10 @@ metrics:
     display_format: integer_cn
     domain: member
     higher_is_better: true
+    typical_dimensions: [region, sub_region, big_system_channel, item_dan]
+    typical_questions:
+      - 各大区首购新客人数
+      - 本月新客数趋势
 
   repurchase_in_60_days_num_total:
     label: 60天复购人数
@@ -733,6 +761,10 @@ metrics:
     decimals: 2
     domain: marketing
     higher_is_better: true
+    typical_dimensions: [region, sub_region, big_system_channel]
+    typical_questions:
+      - 各大区潜客转新率
+      - 精准营养转化率怎么样
 
 # ----------------------------------------------------------------
 # 计算/对比口径（同比、环比、占比、Top N、累计）

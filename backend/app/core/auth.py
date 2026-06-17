@@ -33,6 +33,65 @@ import jwt
 JWT_ALG = "HS256"
 JWT_TTL_HOURS = 24 * 7
 DEFAULT_ADMIN_USERNAME = "admin"
+
+
+class _TokenCache:
+    """token → 已解析 User 的短 TTL 内存缓存。
+
+    背景：每个受保护接口都会 verify_token → get_by_id 查一次用户库。公司目录模式下
+    这是一次 MySQL 往返，于是"每点一个模块/翻一页"都先卡在一次 DB 查询上（全局卡顿根因）。
+    缓存后同一 token 的后续请求直接命中内存，省掉这次往返。
+
+    安全：JWT 签名/过期仍在每次请求里 jwt.decode 强校验（命中缓存也不跳过）；缓存只省
+    "拿 token 里的 uid 去查库"这一步。停用/改密/删除用户时清空缓存 → 同进程内即时吊销；
+    跨进程（多 worker）最多 TTL 秒后一致。TTL 可用 DATACHAT_AUTH_CACHE_TTL 调，设 0 关闭。
+    """
+
+    def __init__(self) -> None:
+        self._d: dict[str, tuple[Any, float]] = {}
+        self._lk = threading.Lock()
+        try:
+            self.ttl = float(os.environ.get("DATACHAT_AUTH_CACHE_TTL", "30") or 0)
+        except ValueError:
+            self.ttl = 30.0
+
+    def get(self, token: str):
+        if self.ttl <= 0 or not token:
+            return None
+        with self._lk:
+            hit = self._d.get(token)
+            if not hit:
+                return None
+            user, exp = hit
+            if exp < time.time():
+                self._d.pop(token, None)
+                return None
+            return user
+
+    def set(self, token: str, user: Any) -> None:
+        if self.ttl <= 0 or not token or user is None:
+            return
+        with self._lk:
+            if len(self._d) > 8192:  # 防止无界增长：超阈值先清掉过期项
+                now = time.time()
+                for k in [k for k, (_, e) in self._d.items() if e < now]:
+                    self._d.pop(k, None)
+                if len(self._d) > 8192:
+                    self._d.clear()
+            self._d[token] = (user, time.time() + self.ttl)
+
+    def clear(self) -> None:
+        with self._lk:
+            self._d.clear()
+
+
+# 进程级单例：AuthStore 与 CompanyAuthStore 共用，任一处改密/停用都全局生效。
+_token_cache = _TokenCache()
+
+
+def invalidate_token_cache() -> None:
+    """用户态变更（停用/改密/删除）后调用，立即吊销同进程内所有缓存的 token 解析。"""
+    _token_cache.clear()
 # 不在源码里写明文默认密码；env 未配置时启动期一次性随机生成（见 _ensure_admin）
 DEFAULT_ADMIN_EMAIL = "admin@example.com"
 
@@ -303,6 +362,7 @@ class AuthStore:
             raise AuthError("不能删除默认管理员")
         with self._lock, self._conn() as c:
             c.execute("DELETE FROM users WHERE username=?", (username,))
+        invalidate_token_cache()
 
     def set_active(self, username: str, is_active: bool) -> None:
         """启用/停用账号。停用后该用户无法登录、已签发 token 立即失效（见 verify_token）。"""
@@ -313,6 +373,7 @@ class AuthStore:
             cur = c.execute("UPDATE users SET is_active=? WHERE username=?", (1 if is_active else 0, username))
             if cur.rowcount == 0:
                 raise AuthError(f"用户不存在: {username}")
+        invalidate_token_cache()  # 停用即时吊销缓存里的 token
 
     def set_password(self, username: str, new_password: str, *, enforce_strength: bool = True,
                      clear_must_change: bool = True) -> None:
@@ -333,6 +394,7 @@ class AuthStore:
                 cur = c.execute("UPDATE users SET password_hash=?, password_changed_at=? WHERE username=?", (h, now, username))
             if cur.rowcount == 0:
                 raise AuthError(f"用户不存在: {username}")
+        invalidate_token_cache()  # 改密即时吊销缓存里的旧 token
 
     # ---------------------------------------------------------- auth flow
 
@@ -384,6 +446,9 @@ class AuthStore:
             raise AuthError("token 已过期，请重新登录")
         except jwt.InvalidTokenError:
             raise AuthError("token 无效")
+        cached = _token_cache.get(token)
+        if cached is not None:
+            return cached
         uid = str(payload.get("sub") or "")
         user = self.get_by_id(uid)
         if not user:
@@ -395,6 +460,7 @@ class AuthStore:
         pwd_changed = float(getattr(user, "password_changed_at", 0) or 0)
         if pwd_changed > 0 and int(payload.get("iat") or 0) < int(pwd_changed):
             raise AuthError("密码已修改，请重新登录")
+        _token_cache.set(token, user)
         return user
 
 

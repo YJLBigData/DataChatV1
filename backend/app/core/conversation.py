@@ -45,11 +45,15 @@ class ConversationStore:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
+    _db: sqlite3.Connection | None = None
+
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        # 复用单条调优连接（受 self._lock 串行化）。`with conn:` 只提交不关闭，
+        # 故所有 `with self._lock, self._conn() as c:` 调用点无需改动。
+        if self._db is None:
+            from app.core.sqlite_util import open_tuned
+            self._db = open_tuned(self.path)
+        return self._db
 
     def _init_schema(self) -> None:
         with self._lock, self._conn() as c:

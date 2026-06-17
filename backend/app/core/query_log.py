@@ -48,17 +48,42 @@ class QueryLogStore:
     def __init__(self, path: str | Path):
         self.path = str(path)
         self._lock = threading.RLock()
+        self._db: sqlite3.Connection | None = None
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
     def _conn(self) -> sqlite3.Connection:
-        c = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
-        c.row_factory = sqlite3.Row
-        c.execute("PRAGMA journal_mode=WAL")
-        return c
+        # 复用单条长连接（受 self._lock 串行化，check_same_thread=False 跨线程安全）。
+        # 旧实现每次 list/record 都 connect()+PRAGMA journal_mode=WAL，连接频繁开关会让
+        # WAL 长期得不到 checkpoint 而越涨越大 → 服务器上日志查询慢到 ~1 分钟的根因之一。
+        # 单连接 + busy_timeout + synchronous=NORMAL 让读写都快且不互相阻塞死。
+        if self._db is None:
+            c = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=NORMAL")
+            c.execute("PRAGMA busy_timeout=5000")
+            c.execute("PRAGMA temp_store=MEMORY")
+            # 一次性把可能已经膨胀的 WAL 截断回收（历史遗留的大 WAL 会拖慢首次读）。
+            try:
+                c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            self._db = c
+        return self._db
+
+    def _reset_conn(self) -> None:
+        """连接出问题（如文件被替换/损坏）时丢弃重建，恢复旧实现"每次新连接"的自愈性。"""
+        try:
+            if self._db is not None:
+                self._db.close()
+        except Exception:
+            pass
+        self._db = None
 
     def _init_schema(self) -> None:
-        with self._lock, self._conn() as c:
+        with self._lock:
+            c = self._conn()
             c.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS query_log (
@@ -247,15 +272,19 @@ class QueryLogStore:
                 json.dumps(plan, ensure_ascii=False, default=str),
                 time.time(),
             )
-            with self._lock, self._conn() as c:
-                c.execute(
-                    "INSERT INTO query_log("
-                    "id, trace_id, user_id, username, conversation_id, question,"
-                    " metric, table_name, sql, rows, elapsed_ms,"
-                    " cached, needs_clarify, status, error, plan_json, created_at"
-                    ") VALUES (?,?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?)",
-                    row,
-                )
+            insert_sql = (
+                "INSERT INTO query_log("
+                "id, trace_id, user_id, username, conversation_id, question,"
+                " metric, table_name, sql, rows, elapsed_ms,"
+                " cached, needs_clarify, status, error, plan_json, created_at"
+                ") VALUES (?,?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?)"
+            )
+            with self._lock:
+                try:
+                    self._conn().execute(insert_sql, row)
+                except sqlite3.Error:
+                    self._reset_conn()
+                    self._conn().execute(insert_sql, row)
         except Exception as exc:  # never fail chat because of audit logging
             logger.warning("query_log record failed: %s", exc)
 
@@ -283,16 +312,29 @@ class QueryLogStore:
             kw = f"%{keyword}%"
             params.extend([kw, kw, kw])
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-        with self._lock, self._conn() as c:
-            total = c.execute(f"SELECT COUNT(*) FROM query_log {where_sql}", params).fetchone()[0]
-            rows = c.execute(
-                f"SELECT id, trace_id, user_id, username, conversation_id, question,"
-                f" metric, table_name, sql, rows, elapsed_ms,"
-                f" cached, needs_clarify, status, error, plan_json, created_at"
-                f" FROM query_log {where_sql}"
-                f" ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (*params, int(limit), int(offset)),
-            ).fetchall()
+        count_sql = f"SELECT COUNT(*) FROM query_log {where_sql}"
+        page_sql = (
+            f"SELECT id, trace_id, user_id, username, conversation_id, question,"
+            f" metric, table_name, sql, rows, elapsed_ms,"
+            f" cached, needs_clarify, status, error, plan_json, created_at"
+            f" FROM query_log {where_sql}"
+            f" ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        )
+        page_params = (*params, int(limit), int(offset))
+
+        def _run() -> tuple[int, list[Any]]:
+            c = self._conn()
+            t = c.execute(count_sql, params).fetchone()[0]
+            rs = c.execute(page_sql, page_params).fetchall()
+            return t, rs
+
+        with self._lock:
+            try:
+                total, rows = _run()
+            except sqlite3.Error as exc:
+                logger.warning("query_log list failed, resetting connection: %s", exc)
+                self._reset_conn()
+                total, rows = _run()
         items: list[dict[str, Any]] = []
         for r in rows:
             d = dict(r)

@@ -63,12 +63,14 @@ class LLMPresetsStore:
         self._lock = threading.RLock()
         self._init_schema()
 
+    _db: sqlite3.Connection | None = None
+
     def _conn(self) -> sqlite3.Connection:
-        c = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
-        c.row_factory = sqlite3.Row
-        c.execute("PRAGMA journal_mode=WAL")
-        c.execute("PRAGMA foreign_keys=ON")
-        return c
+        if self._db is None:
+            from app.core.sqlite_util import open_tuned
+            self._db = open_tuned(self.path)
+            self._db.execute("PRAGMA foreign_keys=ON")
+        return self._db
 
     def _init_schema(self) -> None:
         with self._lock, self._conn() as c:

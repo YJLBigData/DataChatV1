@@ -486,6 +486,77 @@ def test_planner_overrides_llm_clarify_when_structurally_sufficient(planner, sem
     assert "'2025'" in sql and "'01'" in sql
 
 
+def test_planner_multi_metric_achievement_rate(planner, semantic):
+    """回归：'各大区门店销售金额、门店销售目标和销售达成率，按达成率从低到高排序'。
+
+    旧 bug：结构化 planner 只挑单指标（shop_sale_target_total），漏掉金额与达成率，
+    且默认 DESC 无视'从低到高'。修复后应在 target 表上同时产出三个指标 + 升序。
+    """
+    q = "2026年2月各大区门店销售金额、门店销售目标和销售达成率是多少？按达成率从低到高排序。"
+    rule_seed = planner._extract_rule_seed(q, today=date(2026, 6, 16))
+    # 规则层：必须同时点名到金额/目标/达成率，且解析出升序 hint
+    assert len(rule_seed["metric_hits"]) >= 2
+    assert rule_seed["order_hint"] and rule_seed["order_hint"]["dir"] == "asc"
+    assert rule_seed["order_hint"]["field"] == "shop_sale_achievement_rate"
+
+    # 模拟 LLM 返回的"漏指标 + 错排序"的 buggy plan
+    buggy = QueryPlan(
+        metric="shop_sale_target_total",
+        extra_metrics=[],
+        table=TARGET,
+        group_by=["region"],
+        time_range=TimeRange(kind=TimeKind.ABSOLUTE, year="2026", months=["02"]),
+        order_by=[OrderBy(field="shop_sale_target_total", dir="desc")],
+    )
+    bundle = RetrievalBundle(metrics=[], dimensions=[], tables=[], few_shots=[], elapsed_ms=0)
+    out = planner._validate_and_repair(
+        buggy, bundle, rule_seed, today=date(2026, 6, 16),
+        previous_plan=None, followup=False, question=q,
+    )
+    assert out.table == TARGET
+    assert out.metric == "shop_sale_achievement_rate"          # 排序所指 → 主指标
+    assert set(out.extra_metrics) == {"shop_sale_target_total", "shop_sale_amount_actual_total"}
+    assert out.order_by and out.order_by[0].field == "shop_sale_achievement_rate"
+    assert out.order_by[0].dir == "asc"
+    assert out.needs_clarify is False
+
+    sql, _ = PlanCompiler(semantic, default_limit=500).compile(out)
+    assert "SUM(shop_sale_target)" in sql
+    assert "SUM(shop_sale_amount)" in sql
+    assert "NULLIF(SUM(shop_sale_target), 0)" in sql          # 达成率比率列
+    assert "ASC" in sql.upper().split("ORDER BY", 1)[1]       # 升序
+    assert "'2026'" in sql and "'02'" in sql
+
+
+def test_planner_followup_switch_metric_same_table(planner, semantic):
+    """回归：上一轮看'门店销售目标'，这一轮追问'达成率'（同在 target 表）。
+
+    旧 bug：只要不跨表就强行继承上一轮 metric，导致'持续追问要达成率'被无视。
+    修复后：主指标切到达成率，仍继承大区/时间口径，目标降为附带列。
+    """
+    prev = QueryPlan(
+        metric="shop_sale_target_total",
+        extra_metrics=[],
+        table=TARGET,
+        group_by=["region"],
+        time_range=TimeRange(kind=TimeKind.ABSOLUTE, year="2026", months=["02"]),
+        order_by=[OrderBy(field="shop_sale_target_total", dir="desc")],
+    )
+    q = "那达成率呢"
+    assert planner._looks_like_followup(q, prev) is True
+    rule_seed = planner._extract_rule_seed(q, today=date(2026, 6, 16))
+    bundle = RetrievalBundle(metrics=[], dimensions=[], tables=[], few_shots=[], elapsed_ms=0)
+    out = planner._validate_and_repair(
+        QueryPlan(), bundle, rule_seed, today=date(2026, 6, 16),
+        previous_plan=prev, followup=True, question=q,
+    )
+    assert out.table == TARGET
+    assert out.metric == "shop_sale_achievement_rate"
+    assert "shop_sale_target_total" in out.extra_metrics
+    assert out.time_range.year == "2026" and out.time_range.months == ["02"]
+    assert "region" in out.group_by
+
+
 def test_planner_keeps_clarify_when_structurally_insufficient(planner, semantic):
     """信号不足时仍然必须澄清——不能把一切 LLM 澄清都覆盖。"""
     weak_plan = QueryPlan(

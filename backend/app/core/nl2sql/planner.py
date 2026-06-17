@@ -601,6 +601,8 @@ class Planner:
             "rank_n": 0,
             "filter_hits": [],
             "group_by_hint": [],
+            "metric_hits": [],     # 问句里显式点名的全部指标（按别名最长优先去重）
+            "order_hint": None,    # {"field": <metric/dim>, "dir": "asc|desc"} 来自"按X从低到高/高到低"
         }
         # calculation keywords (most-specific keys first to preserve correctness)
         for k, v in CALCULATION_KEYWORDS.items():
@@ -706,6 +708,49 @@ class Planner:
             if d not in seen:
                 uniq.append(d); seen.add(d)
         seed["group_by_hint"] = uniq
+
+        # metric_hits：问句里显式点名了哪些指标（"金额、目标、达成率"这类一句多指标）。
+        # 取每个指标命中的最长别名长度，长别名优先（更具体），去重保序。
+        ranked: list[tuple[int, str]] = []
+        for m in self.semantic.list_metrics():
+            best_len = 0
+            for a in m.all_aliases():
+                if a and len(a) >= 2 and a in q:
+                    best_len = max(best_len, len(a))
+            if best_len:
+                ranked.append((best_len, m.name))
+        ranked.sort(key=lambda x: -x[0])
+        seen_m: set[str] = set()
+        for _, name in ranked:
+            if name not in seen_m:
+                seed["metric_hits"].append(name)
+                seen_m.add(name)
+
+        # order_hint：显式排序方向（"按达成率从低到高排序"）。先确定方向词，再就近找指标别名。
+        ASC_PAT = r"(从低到高|从小到大|由低到高|由小到大|升序|正序|低到高|小到大)"
+        DESC_PAT = r"(从高到低|从大到小|由高到低|由大到小|降序|倒序|高到低|大到小)"
+        order_dir = ""
+        if re.search(ASC_PAT, q):
+            order_dir = "asc"
+        elif re.search(DESC_PAT, q):
+            order_dir = "desc"
+        if order_dir:
+            dir_pat = ASC_PAT if order_dir == "asc" else DESC_PAT
+            order_field = ""
+            best_alias_len = 0
+            for m in self.semantic.list_metrics():
+                for a in m.all_aliases():
+                    if not a or len(a) < 2 or a not in q:
+                        continue
+                    # 别名与方向词相邻（中间≤8个非标点字符）→ 认为是排序字段
+                    if re.search(re.escape(a) + r"[^，。；、!？\n]{0,8}?" + dir_pat, q) and len(a) > best_alias_len:
+                        order_field = m.name
+                        best_alias_len = len(a)
+            # 没就近匹配到具体指标，但问句确实命中了某个指标 → 用最具体的那个兜底
+            if not order_field and seed["metric_hits"]:
+                order_field = seed["metric_hits"][0]
+            if order_field:
+                seed["order_hint"] = {"field": order_field, "dir": order_dir}
         return seed
 
     def _rule_only_plan(self, question: str, bundle: RetrievalBundle, rule_seed: dict[str, Any], today: date) -> dict[str, Any]:
@@ -756,12 +801,25 @@ class Planner:
             explicit = self._explicit_metric_in_question(question, allowed_tables=allowed_tables)
             prev_md = self.semantic.metric(previous_plan.metric)
             expl_md = self.semantic.metric(explicit.name) if explicit else None
-            # 只有用户显式点了"另一张表的指标"才算主动换主题，否则一律继承上一轮
-            switching = bool(expl_md and prev_md and expl_md.table != prev_md.table)
-            if not switching:
-                plan.metric = previous_plan.metric
-                if not plan.extra_metrics:
-                    plan.extra_metrics = list(previous_plan.extra_metrics)
+            # 跨表显式换指标 = 主动换主题 → 不继承（让本轮 plan 自立）。
+            switching_table = bool(expl_md and prev_md and expl_md.table != prev_md.table)
+            # 同表显式点了"另一个指标"（上一轮看目标、这轮追问达成率）：
+            # 切换主指标到新指标，但仍继承上一轮口径（时间/维度/筛选），上一轮指标降为附带列。
+            # 修复：旧逻辑只要不跨表就强行 plan.metric=上一轮，导致"我持续追问要达成率"被无视。
+            explicit_diff_same_table = bool(
+                expl_md and prev_md and expl_md.table == prev_md.table
+                and expl_md.name != previous_plan.metric
+            )
+
+            def _inherit_context(keep_metric: bool, new_primary: str = "") -> None:
+                if keep_metric:
+                    plan.metric = previous_plan.metric
+                    if not plan.extra_metrics:
+                        plan.extra_metrics = list(previous_plan.extra_metrics)
+                else:
+                    plan.metric = new_primary
+                    carried = [previous_plan.metric, *previous_plan.extra_metrics, *plan.extra_metrics]
+                    plan.extra_metrics = list(dict.fromkeys(m for m in carried if m and m != new_primary))
                 plan.group_by = list(previous_plan.group_by) + [
                     g for g in plan.group_by if g not in previous_plan.group_by
                 ]
@@ -772,6 +830,13 @@ class Planner:
                 plan.filters = list(merged.values())
                 if not plan.calculation and not rule_seed.get("calculation"):
                     plan.calculation = previous_plan.calculation
+
+            if switching_table:
+                pass  # 不继承
+            elif explicit_diff_same_table:
+                _inherit_context(keep_metric=False, new_primary=expl_md.name)
+            else:
+                _inherit_context(keep_metric=True)
 
         # 1. metric must exist
         metric_def = self.semantic.metric(plan.metric)
@@ -789,6 +854,28 @@ class Planner:
 
         # 2. table comes from metric
         plan.table = metric_def.table
+
+        # 2b. 一句多指标（"各大区门店销售金额、门店销售目标和销售达成率"）。
+        #     结构化只能单表聚合 → 选能同时容纳最多指标的表，主指标优先取"排序所指"的那个，
+        #     其余作为附带列一起 SELECT。仅在非多轮继承时整体改写（追问已在 step 0 处理）。
+        #     这是把"LLM 漏选 extra_metrics / 选错表"彻底补齐的确定性兜底。
+        metric_hits = list(rule_seed.get("metric_hits") or [])
+        if len(metric_hits) >= 2 and not inherit:
+            best_t, mapped = self._best_table_for_metrics(metric_hits)
+            if best_t and len(mapped) >= 2:
+                order_field = (rule_seed.get("order_hint") or {}).get("field") or ""
+                primary = self._equivalent_metric_on_table(order_field, best_t) if order_field else None
+                if not primary or primary not in mapped:
+                    cur = self._equivalent_metric_on_table(plan.metric, best_t)
+                    primary = cur if (cur and cur in mapped) else mapped[0]
+                plan.table = best_t
+                plan.metric = primary
+                plan.extra_metrics = [m for m in mapped if m != primary]
+                metric_def = self.semantic.metric(plan.metric) or metric_def
+                logger.info(
+                    "plan.multi_metric table=%s primary=%s extras=%s (hits=%s)",
+                    best_t, primary, plan.extra_metrics, metric_hits,
+                )
 
         # 3a. inject group_by from rule hints (the LLM often misses these)
         for dim_hint in rule_seed.get("group_by_hint") or []:
@@ -837,6 +924,16 @@ class Planner:
             m for m in plan.extra_metrics
             if self.semantic.metric(m) and self.semantic.metric(m).table == plan.table  # type: ignore
         ]
+
+        # 6pre. 显式排序方向（"按达成率从低到高排序"）→ 覆盖 order_by。
+        #       只允许排到"已 SELECT 出来的列"（主指标 / 附带指标 / 分组维度），否则
+        #       compiler 会 ORDER BY 一个不存在的列别名导致 SQL 报错。
+        oh = rule_seed.get("order_hint")
+        if oh and oh.get("field"):
+            of = self._equivalent_metric_on_table(oh["field"], plan.table) or oh["field"]
+            selected_aliases = {plan.metric, *plan.extra_metrics, *plan.group_by}
+            if of in selected_aliases:
+                plan.order_by = [OrderBy(field=of, dir=(oh.get("dir") or "desc"))]
 
         # 6. order by — for rank we always sort by the metric desc
         clean_orders: list[OrderBy] = []
@@ -994,6 +1091,48 @@ class Planner:
         if not d:
             return False
         return table in d.table_columns
+
+    @staticmethod
+    def _norm_expr(expr: str) -> str:
+        return "".join((expr or "").lower().split())
+
+    def _equivalent_metric_on_table(self, metric_name: str, table: str) -> str | None:
+        """把一个指标对齐到目标表：本就在该表→原样；否则找该表上**表达式等价**的指标。
+
+        关键场景：'门店销售金额' 命中 shop_sale_amount_total（明细表），但用户同时要
+        目标/达成率（都在 target 表）。target 表上的 shop_sale_amount_actual_total 表达式
+        同为 SUM(shop_sale_amount)，于是金额可以无损地落到 target 表，三个指标同表一次查出。
+        """
+        md = self.semantic.metric(metric_name)
+        if not md:
+            return None
+        if md.table == table:
+            return metric_name
+        target_expr = self._norm_expr(md.expression)
+        for m in self.semantic.list_metrics():
+            if m.table == table and self._norm_expr(m.expression) == target_expr:
+                return m.name
+        return None
+
+    def _best_table_for_metrics(self, names: list[str]) -> tuple[str | None, list[str]]:
+        """给定一组显式点名的指标，挑出能同时容纳最多指标的单张表（结构化只能单表聚合）。
+        返回 (table, 落到该表上的指标名列表，保序去重)。"""
+        cand_tables: list[str] = []
+        for n in names:
+            md = self.semantic.metric(n)
+            if md and md.table not in cand_tables:
+                cand_tables.append(md.table)
+        best_t: str | None = None
+        best_mapped: list[str] = []
+        for t in cand_tables:
+            mapped: list[str] = []
+            for n in names:
+                em = self._equivalent_metric_on_table(n, t)
+                if em and em not in mapped:
+                    mapped.append(em)
+            if len(mapped) > len(best_mapped):
+                best_t, best_mapped = t, mapped
+        return best_t, best_mapped
 
     def _apply_time_defaults(
         self,

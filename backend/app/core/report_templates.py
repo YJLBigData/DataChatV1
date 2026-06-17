@@ -48,11 +48,13 @@ class ReportTemplateStore:
         self._init_schema()
         self._ensure_default()
 
+    _db: sqlite3.Connection | None = None
+
     def _conn(self) -> sqlite3.Connection:
-        c = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
-        c.row_factory = sqlite3.Row
-        c.execute("PRAGMA journal_mode=WAL")
-        return c
+        if self._db is None:
+            from app.core.sqlite_util import open_tuned
+            self._db = open_tuned(self.path)
+        return self._db
 
     def _init_schema(self) -> None:
         with self._lock, self._conn() as c:

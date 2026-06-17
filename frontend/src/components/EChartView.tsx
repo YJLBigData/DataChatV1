@@ -68,21 +68,24 @@ export function EChartView({ mode, table, height = 320 }: Props) {
 
   const option = useMemo(() => buildOption(mode, table), [mode, table]);
 
+  // init 一次 + 容器尺寸变化自动 resize（ResizeObserver 比反复挂 window.resize 更准更省）。
   useEffect(() => {
     if (!ref.current) return;
-    if (!chart.current) chart.current = echarts.init(ref.current);
-    chart.current.setOption(option, true);
-    const onResize = () => chart.current?.resize();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [option]);
-
-  useEffect(() => {
+    const inst = echarts.init(ref.current);
+    chart.current = inst;
+    const ro = new ResizeObserver(() => inst.resize());
+    ro.observe(ref.current);
     return () => {
-      chart.current?.dispose();
+      ro.disconnect();
+      inst.dispose();
       chart.current = null;
     };
   }, []);
+
+  // 仅在 option 变化时增量重绘；图表实例复用，切换图表类型即时生效、不再重建实例。
+  useEffect(() => {
+    chart.current?.setOption(option, true);
+  }, [option]);
 
   return <div ref={ref} style={{ width: "100%", height }} />;
 }
