@@ -60,12 +60,22 @@ def _clean_intent(plan: dict[str, Any]) -> dict[str, Any]:
             "op": str(f.get("op") or "eq"),
             "values": [str(v) for v in (f.get("values") or [])],
         })
+    having: list[dict[str, Any]] = []
+    for h in plan.get("having") or []:
+        if not isinstance(h, dict) or not h.get("metric"):
+            continue
+        having.append({
+            "metric": str(h.get("metric") or ""),
+            "op": str(h.get("op") or "lt"),
+            "value": h.get("value"),
+        })
     return {
         "metric": str(plan.get("metric") or ""),
         "extra_metrics": [str(m) for m in (plan.get("extra_metrics") or [])],
         "table": str(plan.get("table") or ""),
         "group_by": [str(g) for g in (plan.get("group_by") or [])],
         "filters": filters,
+        "having": having,
         "time_range": plan.get("time_range") or {},
         "calculation": str(plan.get("calculation") or ""),
         "order_by": plan.get("order_by") or [],

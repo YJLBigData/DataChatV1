@@ -200,6 +200,15 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # 专家团（独立模块）：决策调度总监 + 多专家协同问数/报告。整段自包含在
+    # app.expert_team 下，这里仅一行挂载，不与问数主链路耦合（导入失败不影响主应用）。
+    try:
+        from app.expert_team.api import router as _expert_team_router
+        app.include_router(_expert_team_router)
+        logger.info("expert_team router mounted at /api/expert-team")
+    except Exception as _exc:  # noqa: BLE001
+        logger.warning("expert_team router not mounted: %s", _exc)
+
     # 阶段 1.4 限流：per-token（含未登录退化到 IP）。模块缺失时静默降级（仅警告）。
     if _SLOWAPI_OK and _SlowLimiter is not None:
         def _identify_token(request: Request) -> str:

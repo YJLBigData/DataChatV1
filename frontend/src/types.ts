@@ -236,7 +236,49 @@ export interface SemanticProposal {
   metrics: Record<string, any>;
 }
 
-export type PageId = "chat" | "users" | "logs" | "semantic" | "permissions" | "report_templates" | "llm_settings";
+export type PageId = "chat" | "expert" | "users" | "logs" | "semantic" | "permissions" | "report_templates" | "llm_settings";
+
+/* ---------- 专家团（expert-team） ---------- */
+export interface ExpertCard {
+  id: string;
+  name: string;
+  profession: string;
+  emoji: string;
+  skills: string[];
+  is_director: boolean;
+  is_builtin: boolean;
+}
+
+export interface ExpertWorkflow { name: string; trigger: string; flow: string }
+
+export interface ExpertTeamBootstrap {
+  director: ExpertCard | null;
+  experts: ExpertCard[];
+  user_skills: ExpertCard[];
+  knowledge_files: string[];
+  workflows: ExpertWorkflow[];
+}
+
+export interface ExpertContribution {
+  id: string;
+  name: string;
+  profession: string;
+  emoji: string;
+  subtask: string;
+  analysis: string;
+  data?: { narrative?: string; sql?: string; rows?: number; table_preview?: string };
+}
+
+export interface ExpertTeamResult {
+  ok: boolean;
+  error?: string;
+  route: string;
+  plan: string;
+  experts: ExpertContribution[];
+  report: string;
+  elapsed_ms: number;
+  events?: { stage: string; [k: string]: any }[];
+}
 
 export interface LLMSettingItem {
   value: string;

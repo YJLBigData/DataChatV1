@@ -50,6 +50,23 @@ class PlanFilter:
 
 
 @dataclass
+class HavingFilter:
+    """指标阈值过滤（聚合后的 HAVING）。
+
+    与 PlanFilter 的区别：PlanFilter 过滤"维度"（聚合前 WHERE），HavingFilter 过滤
+    "指标"（聚合后 HAVING）。例如"列出达成率低于90%的省区/渠道"= 按省区/渠道分组后，
+    HAVING 达成率 < 0.9。metric 为语义层指标 key，编译器按其聚合表达式生成 HAVING。
+    """
+    metric: str              # logical metric name (compiled against its aggregate expression)
+    op: str = "lt"           # lt | lte | gt | gte | eq | ne
+    value: float = 0.0
+    raw: str = ""            # original tokens, e.g. "达成率低于90%"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"metric": self.metric, "op": self.op, "value": self.value, "raw": self.raw}
+
+
+@dataclass
 class OrderBy:
     field: str
     dir: str = "desc"
@@ -65,6 +82,7 @@ class QueryPlan:
     table: str = ""                                    # resolved physical table
     group_by: list[str] = field(default_factory=list)  # logical dimension names
     filters: list[PlanFilter] = field(default_factory=list)
+    having: list[HavingFilter] = field(default_factory=list)  # 指标阈值过滤（聚合后 HAVING）
     time_range: TimeRange = field(default_factory=TimeRange)
     calculation: str = ""           # yoy_growth | mom_growth | ratio | rank | trend | delta | cumulative | ""
     order_by: list[OrderBy] = field(default_factory=list)
@@ -86,6 +104,7 @@ class QueryPlan:
             "table": self.table,
             "group_by": list(self.group_by),
             "filters": [f.to_dict() for f in self.filters],
+            "having": [h.to_dict() for h in self.having],
             "time_range": self.time_range.to_dict(),
             "calculation": self.calculation,
             "order_by": [o.to_dict() for o in self.order_by],
@@ -146,6 +165,29 @@ class QueryPlan:
                     raw=str(f.get("raw") or ""),
                 ))
 
+        # ---- having (metric thresholds; must be list of dict) ----
+        having: list[HavingFilter] = []
+        raw_having = data.get("having")
+        _op_alias = {
+            "<": "lt", "<=": "lte", "≤": "lte", ">": "gt", ">=": "gte", "≥": "gte",
+            "=": "eq", "==": "eq", "!=": "ne", "<>": "ne", "≠": "ne",
+            "lt": "lt", "lte": "lte", "gt": "gt", "gte": "gte", "eq": "eq", "ne": "ne",
+        }
+        if isinstance(raw_having, list):
+            for h in raw_having:
+                if not isinstance(h, dict):
+                    continue
+                name = str(h.get("metric") or h.get("field") or "")
+                if not name:
+                    continue
+                op = _op_alias.get(str(h.get("op") or "lt").strip().lower(), "lt")
+                having.append(HavingFilter(
+                    metric=name,
+                    op=op,
+                    value=_as_float(h.get("value"), 0.0),
+                    raw=str(h.get("raw") or ""),
+                ))
+
         # ---- order_by (must be list of dict) ----
         orders: list[OrderBy] = []
         raw_orders = data.get("order_by")
@@ -187,6 +229,7 @@ class QueryPlan:
             table=str(data.get("table") or ""),
             group_by=group_by,
             filters=filters,
+            having=having,
             time_range=tr,
             calculation=str(data.get("calculation") or ""),
             order_by=orders,
@@ -224,6 +267,10 @@ class QueryPlan:
                 ((f.dimension, sorted([str(v) for v in (f.values or [])]), f.op or "in")
                  for f in (self.filters or [])),
                 key=lambda x: x[0],
+            ),
+            "having": sorted(
+                ((h.metric, h.op or "lt", float(h.value or 0)) for h in (self.having or [])),
+                key=lambda x: (x[0], x[1]),
             ),
             "time_range": self.time_range.to_dict() if self.time_range else None,
             "calculation": self.calculation or "",

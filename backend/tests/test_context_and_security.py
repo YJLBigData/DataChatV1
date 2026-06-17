@@ -17,7 +17,7 @@ sys.path.insert(0, str(BACKEND))
 
 from app.core.config import load_config, reset_for_tests  # noqa: E402
 from app.core.semantic import SemanticLayer  # noqa: E402
-from app.core.nl2sql.plan import OrderBy, PlanFilter, QueryPlan, TimeKind, TimeRange  # noqa: E402
+from app.core.nl2sql.plan import HavingFilter, OrderBy, PlanFilter, QueryPlan, TimeKind, TimeRange  # noqa: E402
 from app.core.nl2sql.compiler import PlanCompiler  # noqa: E402
 from app.core.nl2sql.planner import Planner  # noqa: E402
 from app.core.retrieval import RetrievalBundle  # noqa: E402
@@ -526,6 +526,66 @@ def test_planner_multi_metric_achievement_rate(planner, semantic):
     assert "NULLIF(SUM(shop_sale_target), 0)" in sql          # 达成率比率列
     assert "ASC" in sql.upper().split("ORDER BY", 1)[1]       # 升序
     assert "'2026'" in sql and "'02'" in sql
+
+
+def test_compiler_having_threshold_basic(semantic):
+    """编译器：达成率阈值 → HAVING。用聚合表达式比较（不依赖 SELECT 别名），
+    位置在 GROUP BY 之后、ORDER BY 之前。"""
+    plan = QueryPlan(
+        metric="shop_sale_achievement_rate",
+        extra_metrics=["shop_sale_amount_actual_total", "shop_sale_target_total"],
+        table=TARGET,
+        group_by=["sub_region", "big_system_channel"],
+        filters=[PlanFilter(dimension="region", op="eq", values=["东一区"])],
+        having=[HavingFilter(metric="shop_sale_achievement_rate", op="lt", value=0.9)],
+        time_range=TimeRange(kind=TimeKind.ABSOLUTE, year="2026", months=["01"]),
+        order_by=[OrderBy(field="shop_sale_achievement_rate", dir="asc")],
+    )
+    sql, _ = PlanCompiler(semantic, default_limit=500).compile(plan)
+    up = sql.upper()
+    assert "HAVING" in up
+    assert up.index("GROUP BY") < up.index("HAVING") < up.index("ORDER BY")
+    assert "NULLIF(SUM(shop_sale_target), 0)) < 0.9" in sql
+
+
+def test_planner_having_followup_achievement_below_90(planner, semantic):
+    """回归（用户报障）：多轮追问'把达成率低于90%的省区和渠道列出来'。
+
+    旧 bug：生成 SQL 漏掉 < 0.9 阈值（IR 根本没有 HAVING 概念）。
+    修复后：规则层抽到阈值 → plan.having 带达成率<0.9（90%→0.9 归一）→ 编译出 HAVING。
+    """
+    prev = QueryPlan(
+        metric="shop_sale_achievement_rate",
+        extra_metrics=["shop_sale_amount_actual_total", "shop_sale_target_total"],
+        table=TARGET,
+        group_by=["sub_region", "big_system_channel"],
+        filters=[PlanFilter(dimension="region", op="eq", values=["东一区"])],
+        time_range=TimeRange(kind=TimeKind.ABSOLUTE, year="2026", months=["01"]),
+        order_by=[OrderBy(field="shop_sale_achievement_rate", dir="asc")],
+    )
+    q = "把达成率低于90%的省区和渠道列出来"
+    assert planner._looks_like_followup(q, prev) is True
+    rule_seed = planner._extract_rule_seed(q, today=date(2026, 6, 16))
+    assert rule_seed["having_hints"], "未能从问句提取达成率阈值"
+    hint = rule_seed["having_hints"][0]
+    assert hint["op"] == "lt" and hint["value"] == 90.0 and hint["is_percent"] is True
+
+    bundle = RetrievalBundle(metrics=[], dimensions=[], tables=[], few_shots=[], elapsed_ms=0)
+    out = planner._validate_and_repair(
+        QueryPlan(), bundle, rule_seed, today=date(2026, 6, 16),
+        previous_plan=prev, followup=True, question=q,
+    )
+    assert out.metric == "shop_sale_achievement_rate"
+    assert out.having, "plan.having 为空——阈值丢失"
+    hv = out.having[0]
+    assert hv.metric == "shop_sale_achievement_rate" and hv.op == "lt"
+    assert abs(hv.value - 0.9) < 1e-9, f"百分比未归一: {hv.value}"
+
+    sql, _ = PlanCompiler(semantic, default_limit=500).compile(out)
+    assert "HAVING" in sql.upper()
+    assert "< 0.9" in sql
+    assert "lev2_name` = '东一区'" in sql  # 仍继承东一区过滤
+    assert out.needs_clarify is False
 
 
 def test_planner_followup_switch_metric_same_table(planner, semantic):

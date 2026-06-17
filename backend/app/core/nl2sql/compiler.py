@@ -93,6 +93,7 @@ class PlanCompiler:
             }
 
         where = self._build_where(plan, table)
+        having = self._build_having(plan, table)
         order_clause = self._build_order(plan, metric)
         limit = plan.limit or (self.default_limit if plan.group_by or plan.calculation == "rank" else 0)
 
@@ -103,6 +104,7 @@ class PlanCompiler:
             group_cols=group_cols,
             order_clause=order_clause,
             limit=limit,
+            having=having,
         )
         return sql, meta
 
@@ -128,8 +130,9 @@ class PlanCompiler:
         }
 
         where = self._build_where(plan, table)
+        having = self._build_having(plan, table)
         order_clause = f"`{metric.name}` DESC"
-        sql = self._assemble_sql(select_parts, table, where, group_cols, order_clause, plan.limit or self.default_limit)
+        sql = self._assemble_sql(select_parts, table, where, group_cols, order_clause, plan.limit or self.default_limit, having=having)
         return sql, meta
 
     # ----------------------------------------------------------- yoy_growth
@@ -418,6 +421,7 @@ class PlanCompiler:
         limit: int,
         *,
         no_limit: bool = False,
+        having: list[str] | None = None,
     ) -> str:
         select_clause = ",\n       ".join(select_parts)
         sql = f"SELECT {select_clause}\nFROM {_qident(table.schema)}.{_qident(table.name)}"
@@ -425,11 +429,43 @@ class PlanCompiler:
             sql += "\nWHERE " + "\n  AND ".join(where)
         if group_cols:
             sql += "\nGROUP BY " + ", ".join(group_cols)
+        if having:
+            sql += "\nHAVING " + "\n  AND ".join(having)
         if order_clause:
             sql += "\nORDER BY " + order_clause
         if not no_limit and limit > 0:
             sql += f"\nLIMIT {int(limit)}"
         return sql
+
+    # ------------------------------------------------------------ having
+
+    _HAVING_OP_SYMBOL = {"lt": "<", "lte": "<=", "gt": ">", "gte": ">=", "eq": "=", "ne": "<>"}
+
+    def _build_having(self, plan: QueryPlan, table: TableDef) -> list[str]:
+        """指标阈值 → HAVING 子句。按指标的聚合表达式生成（如
+        `(SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0)) < 0.9`），
+        不依赖 SELECT 别名，保证即便该指标未被选出也能正确过滤。"""
+        clauses: list[str] = []
+        for h in plan.having or []:
+            md = self.semantic.metric(h.metric)
+            if not md or md.table != table.name or not md.expression:
+                continue
+            sym = self._HAVING_OP_SYMBOL.get((h.op or "lt").lower())
+            if not sym:
+                continue
+            clauses.append(f"({md.expression}) {sym} {_fmt_number(h.value)}")
+        return clauses
+
+
+def _fmt_number(value: Any) -> str:
+    """阈值数字格式化：整数去掉 .0，浮点保留原样，非数字兜底为 0。"""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return "0"
+    if f == int(f):
+        return str(int(f))
+    return repr(f)
 
 
 def _shift_months(year: str, months: list[str], delta: int) -> tuple[str, list[str]]:

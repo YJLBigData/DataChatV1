@@ -295,6 +295,28 @@ export const api = {
   chat: (req: { question: string; conversation_id?: string | null; force_refresh?: boolean; llm_provider?: string | null }) =>
     jsonReq<ChatResult>("/api/chat", { method: "POST", body: JSON.stringify(req) }),
 
+  /* ---------- 专家团（多 skill 编排：决策总监调度 + 专家协同 + 报告合成） ---------- */
+  expertTeamBootstrap: () =>
+    jsonReq<import("./types").ExpertTeamBootstrap>("/api/expert-team/bootstrap"),
+  expertTeamChat: (req: {
+    question: string;
+    expert_ids?: string[] | null;
+    want_report?: boolean;
+    llm_provider?: string | null;
+    conversation_id?: string | null;
+  }) =>
+    jsonReq<import("./types").ExpertTeamResult>("/api/expert-team/chat", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+  expertTeamCreateSkill: (req: { name: string; profession?: string; instructions?: string; emoji?: string }) =>
+    jsonReq<{ ok: boolean; error?: string; skill?: import("./types").ExpertCard }>("/api/expert-team/skills", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+  expertTeamDeleteSkill: (id: string) =>
+    jsonReq<{ ok: boolean }>(`/api/expert-team/skills/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
   /* ---------- LLM 模型 ---------- */
   listLLMProviders: () =>
     jsonReq<{

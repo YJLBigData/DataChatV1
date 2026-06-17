@@ -31,6 +31,7 @@ import { LoginScreen } from "./components/LoginScreen";
 import { PasswordModal } from "./components/PasswordModal";
 import { Sidebar } from "./components/Sidebar";
 import { UserMenu } from "./components/UserMenu";
+import { ExpertPanelPage } from "./components/pages/ExpertPanelPage";
 import { LLMSettingsPage } from "./components/pages/LLMSettingsPage";
 import { LogsPage } from "./components/pages/LogsPage";
 import { PermissionsPage } from "./components/pages/PermissionsPage";
@@ -595,6 +596,11 @@ export default function App() {
                 onToggleForceRefresh={setForceRefresh}
               />
             </>
+          )}
+
+          {/* ====================== 专家团（复用问数交互，独立会话） ====================== */}
+          {page === "expert" && (
+            <ExpertPanelPage user={user} llmProvider={llmChoice} />
           )}
 
           {/* ====================== admin pages ====================== */}

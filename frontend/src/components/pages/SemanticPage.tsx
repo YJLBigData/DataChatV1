@@ -128,15 +128,15 @@ export function SemanticPage() {
     return { v, total };
   }, [tables, dims, metrics]);
 
-  if (loading) return <div className="px-6 py-12 text-center text-sm text-slate-400">加载语义层…</div>;
+  if (loading) return <div className="px-6 py-12 text-center text-sm text-slate-400">加载知识库…</div>;
 
   return (
     <div className="mx-auto max-w-6xl space-y-4 px-6 py-6">
       <div className="flex items-end justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold text-slate-800">知识库 / 语义层</h2>
+          <h2 className="text-lg font-semibold text-slate-800">知识库</h2>
           <p className="text-xs text-slate-400">
-            业务术语、指标、维度、表的统一语义建模。修改后保存即重建检索索引。
+            业务术语、指标、维度、表的统一语义建模（问数与专家团共用）。修改后保存即重建检索索引。
             <span className={`ml-2 rounded-full px-2 py-0.5 text-[11px] ${certStats.v === certStats.total ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600"}`}
               title="机器起草的条目默认为草稿；业务确认口径后点状态列认证。已认证口径在问数时优先采用。">
               认证进度 {certStats.v}/{certStats.total}
@@ -355,7 +355,7 @@ function AnalyzeNewTableModal({ onClose, onSaved }: { onClose: () => void; onSav
   return (
     <Modal title="自动分析新表" onClose={onClose} wide>
       <div className="space-y-3">
-        <div className="text-xs text-slate-500">输入 MySQL chatbi 库中的物理表名，让 qwen 自动识别维度 / 指标 / 时间字段，生成语义层建议。生成后可手动微调再保存。</div>
+        <div className="text-xs text-slate-500">输入 MySQL chatbi 库中的物理表名，让 qwen 自动识别维度 / 指标 / 时间字段，生成知识库建议。生成后可手动微调再保存。</div>
         <div className="flex gap-2">
           <input value={table} onChange={(e)=>setTable(e.target.value)}
             placeholder="例如：ads_bi_month_shop_item_dan_summary_df"
@@ -379,7 +379,7 @@ function AnalyzeNewTableModal({ onClose, onSaved }: { onClose: () => void; onSav
             <div className="flex justify-end gap-2">
               <button onClick={onClose} className="rounded-xl border px-3 py-1.5 text-xs" style={{borderColor:"#e6ecf6"}}>取消</button>
               <button onClick={saveAll} disabled={busy} className="qq-btn-primary !px-4 !py-1.5 text-xs disabled:opacity-50">
-                {busy ? "保存中…" : "一键保存到语义层"}
+                {busy ? "保存中…" : "一键保存到知识库"}
               </button>
             </div>
           </>

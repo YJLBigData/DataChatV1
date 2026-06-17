@@ -15,10 +15,12 @@ interface Item {
 
 const ITEMS: Item[] = [
   { id: "chat",             label: "问数",     iconPath: "M4 4h16v12H7l-3 3z" },
+  // 专家团：紧跟问数之下，普通用户也能用（页面复用问数交互）
+  { id: "expert",           label: "专家团",   iconPath: "M16 11a4 4 0 100-8 4 4 0 000 8zm-8 0a4 4 0 100-8 4 4 0 000 8zm0 2c-3 0-6 1.5-6 4v3h12v-3c0-2.5-3-4-6-4zm8 0c-.7 0-1.4.1-2 .3 1.8 1 3 2.4 3 3.7v3h7v-3c0-2.5-4.4-4-8-4z" },
   // 用户隔离的功能（普通用户也能用，看到的内容按 user_id 隔离）
   { id: "report_templates", label: "报告模板", iconPath: "M6 2h9l5 5v15H6z M15 2v5h5" },
   // 仅 admin 可见的管理类入口
-  { id: "semantic",         label: "语义层",   iconPath: "M5 8l7-4 7 4M5 8v8l7 4 7-4V8M5 8l7 4 7-4", adminOnly: true },
+  { id: "semantic",         label: "知识库",   iconPath: "M5 8l7-4 7 4M5 8v8l7 4 7-4V8M5 8l7 4 7-4", adminOnly: true },
   { id: "logs",             label: "日志",     iconPath: "M4 5h16M4 11h16M4 17h10",                 adminOnly: true },
   { id: "permissions",      label: "数据权限", iconPath: "M12 2l8 4v6c0 5-3.4 9-8 10-4.6-1-8-5-8-10V6z", adminOnly: true },
   { id: "users",            label: "用户管理", iconPath: "M16 11a4 4 0 100-8 4 4 0 000 8zm-8 0a4 4 0 100-8 4 4 0 000 8zm0 2c-3 0-6 1.5-6 4v3h12v-3c0-2.5-3-4-6-4zm8 0c-.7 0-1.4.1-2 .3 1.8 1 3 2.4 3 3.7v3h7v-3c0-2.5-4.4-4-8-4z", adminOnly: true },

@@ -168,16 +168,25 @@ class Pipeline:
             )
         emit("cache", "miss", {"layer": "L1"}, 0)
 
-        # Stage 1b: question→plan_sig 索引（跨会话/跨上下文加速）
+        # Stage 1b: question→plan_sig 索引（跨会话加速，仅限"无上下文的独立问题"）
         #
         # L1 必须把 ctx_fp 算进 key（多轮上下文里同一句话意图不同），导致"换个会话又问一遍同一题"
-        # 永远 miss。这里加一道弱关联索引：用 (question, user_id) 反查上次问出来的 plan_sig，
-        # 拿到 plan_sig 后到 L2 plan-keyed cache 取完整 answer。命中即跳过 planner LLM (~58s)
-        # + answerer LLM (~120s)，整条请求 < 200ms 返回。
-        # 上下文真变了？没事——这里只是预判，下面 planner 跑完后会再校验一次 plan_sig，
-        # 校验不过就放弃这条加速、走完整流程。
+        # 永远 miss。这里加一道弱关联索引：用 (question, user_id, scope) 反查上次问出来的 plan_sig，
+        # 拿到 plan_sig 后到 L2 plan-keyed cache 取完整 answer，命中即 <200ms 返回。
+        #
+        # 【准确率护栏｜P0】q2p 的 key 里没有上下文（不含 previous_plan / history），所以它**只能**
+        # 服务"全新会话里的首轮独立问题"。一旦本轮带上下文（追问，如"环比呢""拆到省区""只看东一区"），
+        # 同一句问句在不同会话里意图完全不同，命中 q2p 会把别的会话的旧答案串过来——这正是
+        # "变快了但准确率变低了"的根因。带上下文时一律跳过 q2p，让 planner 跑完整流程；
+        # 真正等价的重复仍由下面 Stage 3.7 的 L2(plan) 缓存（planner 之后按真实 plan 签名）兜底加速。
         # key 含权限指纹：权限变更后旧 q2p 索引整体失效（防止越过 planner 拿到旧权限答案）。
-        q2p_key = self.cache._k("q2p", _fingerprint(question_clean, user_id, scope_fp)) if hasattr(self.cache, "_k") else None
+        # 带上下文时把 q2p_key 置空 → 本阶段的读 + 后续 Stage 3.7/末尾的两处写全部自动跳过，
+        # 既不串读旧答案，也不拿"追问语义"污染索引（保证索引里只留无上下文的独立问句）。
+        has_turn_context = bool((previous_plan and previous_plan.metric) or history)
+        q2p_key = (
+            self.cache._k("q2p", _fingerprint(question_clean, user_id, scope_fp))
+            if (hasattr(self.cache, "_k") and not has_turn_context) else None
+        )
         prefetched_plan_sig = None
         if q2p_key and not force_refresh:
             try:

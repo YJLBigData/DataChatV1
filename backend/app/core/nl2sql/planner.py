@@ -28,7 +28,7 @@ from app.core.llm.router import LLMRouter, get_llm_router
 from app.core.retrieval import HybridRetriever, RetrievalBundle, RetrievalCandidate
 from app.core.semantic import SemanticLayer
 
-from .plan import OrderBy, PlanFilter, QueryPlan, TimeKind, TimeRange
+from .plan import HavingFilter, OrderBy, PlanFilter, QueryPlan, TimeKind, TimeRange
 
 logger = logging.getLogger("datachat.planner")
 
@@ -83,6 +83,27 @@ PERIOD_KEYWORDS: dict[str, tuple[str, int]] = {
 QUARTER_RE = re.compile(r"(?:(\d{4})年?)?(?:第)?([1234一二三四])\s*季度")
 QUARTER_MAP = {"一": "1", "二": "2", "三": "3", "四": "4", "1": "1", "2": "2", "3": "3", "4": "4"}
 
+# 指标阈值过滤（HAVING）：把"达成率低于90%""销售额超过100万""占比大于5%"这类
+# 对【指标】的比较条件提取出来。注意：否定式/双字算子（不低于/不超过）必须排在裸算子
+# （低于/超过）之前——alternation 在同一起点按从左到右第一个命中，"不"位置先吃掉"不低于"，
+# 避免被误判成 lt。整段为非重叠匹配（finditer），所以"不低于"里的"低于"不会被二次命中。
+_THRESHOLD_RE = re.compile(
+    r"(?P<op>不低于|不少于|不小于|大于等于|不小过|至少|≥|>=|"
+    r"不超过|不高于|不大于|小于等于|至多|最多|≤|<=|"
+    r"高于|大于|超过|超出|多于|大过|＞|>|"
+    r"低于|小于|不足|不到|少于|达不到|未达到|未及|低过|＜|<)"
+    r"\s*(?P<num>\d+(?:\.\d+)?)\s*(?P<pct>%|％)?\s*(?P<unit>万|亿)?"
+)
+_THRESHOLD_OP_CANON = {
+    "不低于": "gte", "不少于": "gte", "不小于": "gte", "大于等于": "gte", "不小过": "gte",
+    "至少": "gte", "≥": "gte", ">=": "gte",
+    "不超过": "lte", "不高于": "lte", "不大于": "lte", "小于等于": "lte",
+    "至多": "lte", "最多": "lte", "≤": "lte", "<=": "lte",
+    "高于": "gt", "大于": "gt", "超过": "gt", "超出": "gt", "多于": "gt", "大过": "gt", "＞": "gt", ">": "gt",
+    "低于": "lt", "小于": "lt", "不足": "lt", "不到": "lt", "少于": "lt",
+    "达不到": "lt", "未达到": "lt", "未及": "lt", "低过": "lt", "＜": "lt", "<": "lt",
+}
+
 # 多轮"继续/下钻/切片"标记 —— 出现任一即视为对上一轮的追问（而非独立新问题）。
 # 刻意只收录追问语气词；独立问句里常见的 "各/分别/排序/列出/前N" 一律不在此列，
 # 避免把带完整口径的标准问句误判为追问。
@@ -116,6 +137,9 @@ PLAN_SCHEMA = """{
   "group_by": ["<语义层 dimensions 英文 key>"],
   "filters": [
     {"dimension": "<语义层 dimensions key>", "op": "eq|in|like", "values": ["..."]}
+  ],
+  "having": [
+    {"metric": "<语义层 metrics key>", "op": "lt|lte|gt|gte|eq|ne", "value": 0.9}
   ],
   "time_range": {
     "kind": "none|relative|absolute|range",
@@ -185,6 +209,17 @@ class Planner:
                     if best is None or len(a) > best[1]:
                         best = (m, len(a))
         return best[0] if best else None
+
+    def _metric_name_in_text(self, text: str) -> str:
+        """文本片段里出现的指标（按最长别名匹配），返回逻辑指标 key；没有则空串。
+        用于把阈值条件就近绑定到具体指标（"达成率低于90%" → 达成率指标）。"""
+        t = text or ""
+        best_name, best_len = "", 0
+        for m in self.semantic.list_metrics():
+            for a in m.all_aliases():
+                if a and len(a) >= 2 and a in t and len(a) > best_len:
+                    best_name, best_len = m.name, len(a)
+        return best_name
 
     @staticmethod
     def _cjk_ngrams(text: str) -> set[str]:
@@ -543,7 +578,7 @@ class Planner:
             followup_rule = (
                 "\n【多轮追问规则｜最高优先级】本轮是对『上一轮 plan』的追问（升维/降维/筛选/排序/换切面）。"
                 "必须严格继承上一轮的 metric、extra_metrics、table、time_range、calculation；"
-                "只允许按用户这句话的显式增量改动 group_by / filters / order_by / limit。"
+                "只允许按用户这句话的显式增量改动 group_by / filters / having / order_by / limit。"
                 "除非用户这句话本身明确点了**另一个业务指标**或**另一个时间口径**，否则一律不得更换指标/表/时间。"
                 "严禁因为本句没提销售口径就回退到默认销售额或最新月份——那会答错。\n"
             )
@@ -568,7 +603,9 @@ class Planner:
             f"{followup_rule}"
             "口径要求：1) 仅当问句明确提到『销售额』且无上一轮可继承口径时，销售额才默认 "
             "terminal_sale_amount_total；2) 涉及'达成率/目标完成'必须用 target 表的指标；"
-            "3) 用户提到'同比/环比/占比/排名/趋势'必须填到 calculation 字段。"
+            "3) 用户提到'同比/环比/占比/排名/趋势'必须填到 calculation 字段；"
+            "4) 对【指标】的阈值筛选（如'达成率低于90%''销售额超过100万''占比大于5%'）必须写进 having，"
+            "不要遗漏：op 用 lt/lte/gt/gte/eq/ne；百分比类指标(value 用比率，如 90%→0.9、120%→1.2)。"
         )
 
         table_header = (
@@ -603,6 +640,7 @@ class Planner:
             "group_by_hint": [],
             "metric_hits": [],     # 问句里显式点名的全部指标（按别名最长优先去重）
             "order_hint": None,    # {"field": <metric/dim>, "dir": "asc|desc"} 来自"按X从低到高/高到低"
+            "having_hints": [],    # [{"metric": key, "op": lt|lte|gt|gte, "value": float, "is_percent": bool, "raw": str}]
         }
         # calculation keywords (most-specific keys first to preserve correctness)
         for k, v in CALCULATION_KEYWORDS.items():
@@ -751,6 +789,32 @@ class Planner:
                 order_field = seed["metric_hits"][0]
             if order_field:
                 seed["order_hint"] = {"field": order_field, "dir": order_dir}
+
+        # having_hints：指标阈值过滤（"达成率低于90%""销售额超过100万"）。就近把算子绑定到指标：
+        # 先看算子左侧 ≤12 字窗口，再看右侧（"低于90%的达成率"语序），都没有则留空交给校验期用主指标兜底。
+        for hm in _THRESHOLD_RE.finditer(q):
+            op = _THRESHOLD_OP_CANON.get(hm.group("op"))
+            if not op:
+                continue
+            try:
+                val = float(hm.group("num"))
+            except (TypeError, ValueError):
+                continue
+            unit = hm.group("unit") or ""
+            if unit == "万":
+                val *= 1e4
+            elif unit == "亿":
+                val *= 1e8
+            left = q[max(0, hm.start() - 12):hm.start()]
+            right = q[hm.end():hm.end() + 12]
+            metric_name = self._metric_name_in_text(left) or self._metric_name_in_text(right)
+            seed["having_hints"].append({
+                "metric": metric_name,
+                "op": op,
+                "value": val,
+                "is_percent": bool(hm.group("pct")),  # 是否带 % 号；裸数的百分比归一在校验期按指标口径判定
+                "raw": hm.group(0),
+            })
         return seed
 
     def _rule_only_plan(self, question: str, bundle: RetrievalBundle, rule_seed: dict[str, Any], today: date) -> dict[str, Any]:
@@ -952,6 +1016,58 @@ class Planner:
         if plan.calculation == "rank" and not plan.order_by:
             plan.order_by = [OrderBy(field=plan.metric, dir="desc" if metric_def.higher_is_better else "asc")]
 
+        # 6b. HAVING：把"指标阈值"过滤（达成率低于90% / 销售额超过100万）落成 plan.having。
+        #     - 指标解析到当前表（达成率 → 当前 target 表上的达成率指标）；解析不到→用主指标兜底；
+        #     - 百分比指标做 %→比率 归一（90% / 90 → 0.9；120% → 1.2；0.9 原样）；
+        #     - 用聚合表达式编译，过滤的指标若未被 SELECT 则补进 extra_metrics，让用户看见所筛列。
+        valid_ops = {"lt", "lte", "gt", "gte", "eq", "ne"}
+
+        def _resolve_having_metric(token: str) -> str:
+            if not token:
+                return ""
+            # already a logical key on some table?
+            base = token if self.semantic.metric(token) else self._metric_name_in_text(token)
+            if not base:
+                return ""
+            mapped = self._equivalent_metric_on_table(base, plan.table)
+            if mapped:
+                return mapped
+            md = self.semantic.metric(base)
+            return base if (md and md.table == plan.table) else ""
+
+        collected: list[HavingFilter] = []
+
+        def _collect_having(token: str, op: str, value: Any, raw: str, is_percent: bool | None) -> None:
+            op = (op or "lt").lower()
+            if op not in valid_ops:
+                return
+            mname = _resolve_having_metric(token) or (plan.metric if self.semantic.metric(plan.metric) else "")
+            md = self.semantic.metric(mname) if mname else None
+            if not md or md.table != plan.table:
+                return
+            try:
+                val = float(value)
+            except (TypeError, ValueError):
+                return
+            is_pct_metric = (md.display_format == "percent") or (md.unit == "%")
+            if is_pct_metric and (is_percent or val >= 2):
+                # "90%"/"90"/"120" → 比率；已是比率（0.9/1.2，<2 且无%）则原样
+                val = val / 100.0
+            collected.append(HavingFilter(metric=mname, op=op, value=val, raw=str(raw or "")))
+
+        for h in plan.having:  # LLM 直接给的 having（若有）
+            _collect_having(h.metric, h.op, h.value, h.raw, None)
+        for hint in (rule_seed.get("having_hints") or []):  # 规则命中（百分比口径更可靠，最后覆盖）
+            _collect_having(hint.get("metric"), hint.get("op"), hint.get("value"), hint.get("raw"), hint.get("is_percent"))
+
+        dedup_h: dict[tuple[str, str], HavingFilter] = {}
+        for h in collected:
+            dedup_h[(h.metric, h.op)] = h
+        plan.having = list(dedup_h.values())
+        for h in plan.having:
+            if h.metric != plan.metric and h.metric not in plan.extra_metrics:
+                plan.extra_metrics.append(h.metric)
+
         # 7. calculation override from rule (if rule found it but LLM missed)
         if not plan.calculation and rule_seed.get("calculation"):
             plan.calculation = rule_seed["calculation"]
@@ -972,7 +1088,7 @@ class Planner:
 
         # 10. low-confidence => clarify ONLY if metric is unambiguous-bad
         # (we are accuracy-first, but "宁可澄清也不能答错" → never clarify when metric+group_by+filter exist)
-        has_signal = bool(plan.filters) or bool(plan.group_by) or bool(plan.calculation)
+        has_signal = bool(plan.filters) or bool(plan.group_by) or bool(plan.calculation) or bool(plan.having)
         plan_actionable = bool(plan.metric) and has_signal
         if plan.confidence and plan.confidence < 0.3 and not has_signal:
             plan.needs_clarify = True
