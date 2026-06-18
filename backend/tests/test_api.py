@@ -329,14 +329,14 @@ def test_feishu_push_failure_returns_ok_false(client, auth_headers, monkeypatch)
 def test_feishu_push_uses_server_side_trusted_content(client, auth_headers, monkeypatch):
     """P0：推送内容必须来自服务端会话存储（按 trace 取），不信任前端伪造的
     narrative/highlights/rows_preview，并返回内容指纹 content_sha256。"""
-    import app.main as main_mod
     captured: dict = {}
 
     def capture(title, narrative, highlights, rows_preview, **k):
         captured.update(title=title, narrative=narrative, highlights=highlights, rows_preview=rows_preview)
         return {"ok": True}
 
-    monkeypatch.setattr(main_mod, "feishu_push", capture)
+    # 飞书路由已拆到 app.api.routes.feishu —— 在其使用处打桩（不削弱断言）。
+    monkeypatch.setattr("app.api.routes.feishu.feishu_push", capture)
     cid, tid = _seed_trusted_answer(
         client, auth_headers, narrative="真实结论", highlights=["真要点"], rows=[["华东", "999"]],
     )
@@ -361,7 +361,6 @@ def test_feishu_push_rejects_unknown_trace(client, auth_headers):
 
 def test_report_uses_server_side_trusted_content(client, auth_headers, monkeypatch, tmp_path):
     """P0：报告 question/answer/plan/sql 必须来自服务端会话存储，不信任前端 payload。"""
-    import app.main as main_mod
     captured: dict = {}
 
     def fake_generate(question, answer, plan, sql, **k):
@@ -370,7 +369,8 @@ def test_report_uses_server_side_trusted_content(client, auth_headers, monkeypat
         p.write_bytes(b"PK\x03\x04stub")
         return p
 
-    monkeypatch.setattr(main_mod, "generate_report", fake_generate)
+    # 报告路由已拆到 app.api.routes.reports —— 在其使用处打桩（不削弱断言）。
+    monkeypatch.setattr("app.api.routes.reports.generate_report", fake_generate)
     cid, tid = _seed_trusted_answer(client, auth_headers, narrative="可信报告结论")
     r = client.post("/api/report/generate", headers=auth_headers,
                     json={"conversation_id": cid, "trace_id": tid})
@@ -492,11 +492,22 @@ def test_chat_pipeline_failure_returns_ok_false(client, auth_headers, monkeypatc
     assert "answer" not in body  # 失败不返回 answer，不被前端当正常结果渲染
 
 
+def _real_llm_key() -> str:
+    """真实可用的 LLM key：占位符（请填写/PLEASE_REPLACE）与非 ASCII 一律视为未配置。
+    审计 P1-6：本地 .env 常留中文占位符 key，会让 e2e 误判"已配置"而真跑→失败。"""
+    from app.core.llm.router import _clean_key
+    for name in ("DASHSCOPE_API_KEY", "BAILIAN_API_KEY"):
+        k = _clean_key(os.environ.get(name))
+        if k:
+            return k
+    return ""
+
+
 @pytest.mark.e2e
 def test_chat_full(client, auth_headers):
     """Full chat — requires LLM + DB."""
-    if not os.environ.get("DASHSCOPE_API_KEY"):
-        pytest.skip("no API key")
+    if not _real_llm_key():
+        pytest.skip("no real API key (placeholder treated as unset)")
     r = client.post(
         "/api/chat",
         headers=auth_headers,

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../../api";
+import { toast } from "../../shared/toast";
+import { confirmDialog } from "../../shared/dialog";
 
 /**
  * 语义层管理 — 三个 Tab：数据表 / 维度 / 指标。
@@ -73,26 +75,26 @@ export function SemanticPage() {
     if (check && !check.ok) { setYamlCheck(check); return; }
     try {
       const r = await api.semanticPut(yamlEdit.content);
-      alert(`已保存\n指标 ${r.metrics} · 维度 ${r.dimensions} · 表 ${r.tables}`);
+      toast.success(`已保存 · 指标 ${r.metrics} · 维度 ${r.dimensions} · 表 ${r.tables}`);
       setYamlEdit(null);
       await refresh();
-    } catch (e: any) { alert("保存失败：" + (e?.message || e)); }
+    } catch (e: any) { toast.error("保存失败：" + (e?.message || e)); }
   }
   async function rollbackTo(vid: string) {
-    if (!confirm(`回滚到版本 ${vid}？\n当前内容会先自动快照，可再回滚回来。`)) return;
+    if (!(await confirmDialog({ message: `回滚到版本 ${vid}？\n当前内容会先自动快照，可再回滚回来。` }))) return;
     try {
       const r = await api.semanticRollback(vid);
-      alert(`已回滚\n指标 ${r.metrics} · 维度 ${r.dimensions} · 表 ${r.tables}`);
+      toast.success(`已回滚 · 指标 ${r.metrics} · 维度 ${r.dimensions} · 表 ${r.tables}`);
       setYamlEdit(null);
       await refresh();
-    } catch (e: any) { alert("回滚失败：" + (e?.message || e)); }
+    } catch (e: any) { toast.error("回滚失败：" + (e?.message || e)); }
   }
   async function loadVersionIntoEditor(vid: string) {
     try {
       const r = await api.semanticVersionContent(vid);
       setYamlEdit((cur) => (cur ? { ...cur, content: r.content } : cur));
       setYamlCheck(null);
-    } catch (e: any) { alert("载入失败：" + (e?.message || e)); }
+    } catch (e: any) { toast.error("载入失败：" + (e?.message || e)); }
   }
 
   async function saveEntity() {
@@ -101,14 +103,14 @@ export function SemanticPage() {
       await api.semanticUpsert(edit.kind, edit.name, edit.body);
       await refresh();
       setEdit(null);
-    } catch (e: any) { alert("保存失败：" + (e?.message || e)); }
+    } catch (e: any) { toast.error("保存失败：" + (e?.message || e)); }
   }
   async function deleteEntity(kind: Kind, name: string) {
-    if (!confirm(`确定删除 ${kind} / ${name} ?`)) return;
+    if (!(await confirmDialog({ message: `确定删除 ${kind} / ${name} ?`, danger: true }))) return;
     try {
       await api.semanticDelete(kind, name);
       await refresh();
-    } catch (e: any) { alert("删除失败：" + (e?.message || e)); }
+    } catch (e: any) { toast.error("删除失败：" + (e?.message || e)); }
   }
 
   /** 认证工作流：草稿 ⇄ 已认证。已认证条目在问数提示词里有更高优先级。 */
@@ -117,7 +119,7 @@ export function SemanticPage() {
     try {
       await api.semanticSetStatus(kind, name, next);
       await refresh();
-    } catch (e: any) { alert("状态更新失败：" + (e?.message || e)); }
+    } catch (e: any) { toast.error("状态更新失败：" + (e?.message || e)); }
   }
 
   const certStats = useMemo(() => {
@@ -348,7 +350,7 @@ function AnalyzeNewTableModal({ onClose, onSaved }: { onClose: () => void; onSav
         await api.semanticUpsert("metrics", k, v);
       }
       onSaved();
-    } catch (e: any) { alert("保存失败: " + (e?.message || e)); }
+    } catch (e: any) { toast.error("保存失败: " + (e?.message || e)); }
     finally { setBusy(false); }
   }
 

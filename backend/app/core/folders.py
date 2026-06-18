@@ -21,6 +21,14 @@ from pathlib import Path
 from typing import Optional
 
 
+class FolderNotFound(Exception):
+    """收藏目标文件夹不存在或不属于该用户 —— 路由层据此返回 404。"""
+
+    def __init__(self, folder_id: str = ""):
+        super().__init__(f"folder not found: {folder_id}")
+        self.folder_id = folder_id
+
+
 @dataclass
 class Folder:
     id: str
@@ -92,6 +100,15 @@ class FoldersStore:
             ).fetchall()
         return [Folder(**dict(r)) for r in rows]
 
+    def get_folder(self, user_id: str, folder_id: str) -> Optional[Folder]:
+        """按 (user_id, folder_id) 取文件夹 —— 收藏前用它做归属校验，杜绝悬挂收藏。"""
+        with self._lock, self._conn() as c:
+            r = c.execute(
+                "SELECT id,user_id,name,color,created_at FROM folder WHERE id=? AND user_id=?",
+                (folder_id, user_id),
+            ).fetchone()
+        return Folder(**dict(r)) if r else None
+
     def create_folder(self, user_id: str, name: str, color: str = "") -> Folder:
         fid = uuid.uuid4().hex
         now = time.time()
@@ -103,18 +120,24 @@ class FoldersStore:
         return Folder(id=fid, user_id=user_id, name=name or "未命名", color=color or "", created_at=now)
 
     def rename_folder(self, user_id: str, folder_id: str, name: str, color: Optional[str] = None) -> None:
+        """改名（含改色）。文件夹不存在 / 不属于该用户 → FolderNotFound（不再静默 no-op）。"""
         with self._lock, self._conn() as c:
             if color is None:
-                c.execute("UPDATE folder SET name=? WHERE id=? AND user_id=?", (name, folder_id, user_id))
+                cur = c.execute("UPDATE folder SET name=? WHERE id=? AND user_id=?", (name, folder_id, user_id))
             else:
-                c.execute("UPDATE folder SET name=?,color=? WHERE id=? AND user_id=?",
-                          (name, color, folder_id, user_id))
+                cur = c.execute("UPDATE folder SET name=?,color=? WHERE id=? AND user_id=?",
+                                (name, color, folder_id, user_id))
+            if cur.rowcount <= 0:
+                raise FolderNotFound(folder_id)
 
     def delete_folder(self, user_id: str, folder_id: str) -> None:
+        """删除文件夹（连带解除其下收藏）。文件夹不存在 / 不属于该用户 → FolderNotFound。"""
         with self._lock, self._conn() as c:
+            cur = c.execute("DELETE FROM folder WHERE id=? AND user_id=?", (folder_id, user_id))
+            if cur.rowcount <= 0:
+                raise FolderNotFound(folder_id)
             c.execute("DELETE FROM conversation_collection WHERE user_id=? AND folder_id=?",
                       (user_id, folder_id))
-            c.execute("DELETE FROM folder WHERE id=? AND user_id=?", (folder_id, user_id))
 
     # --------------------------------------------------------- collections
 
@@ -138,19 +161,23 @@ class FoldersStore:
         cid = uuid.uuid4().hex
         now = time.time()
         with self._lock, self._conn() as c:
-            try:
-                c.execute(
-                    "INSERT OR IGNORE INTO conversation_collection(id,user_id,conversation_id,folder_id,created_at) VALUES (?,?,?,?,?)",
-                    (cid, user_id, conversation_id, folder_id, now),
-                )
-                # 如果是 IGNORE 没插入，再查回来
-                r = c.execute(
-                    "SELECT id,user_id,conversation_id,folder_id,created_at FROM conversation_collection "
-                    "WHERE user_id=? AND conversation_id=? AND folder_id=?",
-                    (user_id, conversation_id, folder_id),
-                ).fetchone()
-            except Exception:
-                raise
+            # 归属校验（防御性，二次把关）：目标文件夹必须存在且属于该用户，
+            # 否则会写出指向不存在文件夹的悬挂收藏记录。
+            owns = c.execute(
+                "SELECT 1 FROM folder WHERE id=? AND user_id=?", (folder_id, user_id)
+            ).fetchone()
+            if not owns:
+                raise FolderNotFound(folder_id)
+            c.execute(
+                "INSERT OR IGNORE INTO conversation_collection(id,user_id,conversation_id,folder_id,created_at) VALUES (?,?,?,?,?)",
+                (cid, user_id, conversation_id, folder_id, now),
+            )
+            # 如果是 IGNORE 没插入，再查回来
+            r = c.execute(
+                "SELECT id,user_id,conversation_id,folder_id,created_at FROM conversation_collection "
+                "WHERE user_id=? AND conversation_id=? AND folder_id=?",
+                (user_id, conversation_id, folder_id),
+            ).fetchone()
         return Collection(**dict(r))
 
     def remove(self, user_id: str, conversation_id: str, folder_id: str) -> None:
@@ -167,6 +194,26 @@ class FoldersStore:
                 (user_id, conversation_id),
             ).fetchall()
         return [r["folder_id"] for r in rows]
+
+    def folder_ids_for_conversations(self, user_id: str, conversation_ids: list[str]) -> dict[str, list[str]]:
+        """批量版：一次查询拿到多个会话的收藏文件夹，消除前端 N+1。返回 {conv_id: [folder_id,...]}。"""
+        ids = [c for c in (conversation_ids or []) if c]
+        if not ids:
+            return {}
+        out: dict[str, list[str]] = {}
+        # SQLite 变量上限 999，分批查询稳妥
+        with self._lock, self._conn() as c:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                placeholders = ",".join("?" * len(chunk))
+                rows = c.execute(
+                    f"SELECT conversation_id, folder_id FROM conversation_collection "
+                    f"WHERE user_id=? AND conversation_id IN ({placeholders})",
+                    (user_id, *chunk),
+                ).fetchall()
+                for r in rows:
+                    out.setdefault(r["conversation_id"], []).append(r["folder_id"])
+        return out
 
 
 _singleton: Optional[FoldersStore] = None

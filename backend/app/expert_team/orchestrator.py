@@ -102,6 +102,7 @@ class ExpertTeamOrchestrator:
 
         # ---- Phase 3-4：专家执行 ----
         results: list[dict[str, Any]] = []
+        warnings: list[str] = []
         by_id = {p.id: p for p in pool}
         for item in chosen:
             eid = item.get("id")
@@ -117,35 +118,65 @@ class ExpertTeamOrchestrator:
             if data_query:
                 data_meta = self._fetch_data(data_query, user_id=user_id, is_admin=is_admin)
                 data_block = data_meta.get("for_prompt", "")
+                if not data_meta.get("ok"):
+                    warnings.append(f"{p.name}：取数未成功，已转为定性分析")
                 emit("expert", {"status": "data", "id": p.id,
-                                "rows": data_meta.get("rows"), "sql": data_meta.get("sql", "")[:200]})
-            analysis = self._run_expert(p, question, subtask, data_block)
+                                "rows": data_meta.get("rows"), "sql": (data_meta.get("sql") or "")[:200]})
+            analysis, ok = self._run_expert(p, question, subtask, data_block)
+            if not ok:
+                warnings.append(f"{p.name}：分析未成功")
             res = {
                 "id": p.id, "name": p.name, "profession": p.profession, "emoji": p.emoji,
-                "subtask": subtask, "analysis": analysis,
+                "subtask": subtask, "analysis": analysis, "ok": ok,
             }
             if data_meta:
                 res["data"] = {k: data_meta.get(k) for k in ("narrative", "sql", "rows", "table_preview")}
             results.append(res)
-            emit("expert", {"status": "done", "id": p.id, "name": p.name})
+            emit("expert", {"status": "done", "id": p.id, "name": p.name, "ok": ok})
+
+        successful = [r for r in results if r.get("ok")]
+
+        # ---- 失败门：没调度到专家 / 全部专家失败 → 明确报失败，绝不把失败文本当成功答案 ----
+        if not results:
+            emit("director", {"status": "error"})
+            return {
+                "ok": False, "error": "未能调度到合适的专家，请补充问题或更换/勾选其它专家。",
+                "route": route, "plan": plan, "experts": results, "report": "",
+                "warnings": warnings, "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            }
+        if not successful:
+            emit("director", {"status": "error"})
+            return {
+                "ok": False, "error": "本次专家分析未成功（模型或数据服务暂时不可用），请稍后重试。",
+                "route": route, "plan": plan, "experts": results, "report": "",
+                "warnings": warnings, "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            }
 
         # ---- Phase 6：合成（多专家 / 要报告时）；单专家快通道直接用其产出 ----
+        synth_ok = True
         if route == "fast" and len(results) == 1 and not want_report:
             report = results[0]["analysis"]
-        elif not results:
-            report = "未能调度到合适的专家，请补充问题或选择其它专家。"
         else:
             emit("director", {"status": "synthesizing", "msg": "总监正在汇总各专家产出、合成报告…"})
-            report = self._synthesize(question, plan, results, want_report=want_report)
-        emit("director", {"status": "done"})
+            # 仅用成功的专家产出做合成，避免把失败文本喂进报告。
+            report, synth_ok = self._synthesize(question, plan, successful, want_report=want_report)
+        emit("director", {"status": "done" if synth_ok else "error"})
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
+        if not synth_ok:
+            # 合成门未过：明确失败（报告内容仍带回，供排查/人工兜底），前端走降级/错误态。
+            return {
+                "ok": False, "error": "报告合成未完成（模型暂时不可用），请稍后重试。",
+                "route": route, "plan": plan, "experts": results, "report": report,
+                "warnings": warnings, "elapsed_ms": elapsed_ms,
+            }
         return {
             "ok": True,
             "route": route,
             "plan": plan,
             "experts": results,
             "report": report,
+            "warnings": warnings,
             "elapsed_ms": elapsed_ms,
         }
 
@@ -258,7 +289,7 @@ class ExpertTeamOrchestrator:
 
     # --------------------------------------------------------- expert exec
 
-    def _run_expert(self, p: _Participant, question: str, subtask: str, data_block: str) -> str:
+    def _run_expert(self, p: _Participant, question: str, subtask: str, data_block: str) -> tuple[str, bool]:
         methodology = self.registry.skill_methodology(p.skill_ids) if p.skill_ids else ""
         knowledge = self.registry.knowledge_digest(max_chars=3500)
         sys_parts = [p.persona.strip()]
@@ -280,14 +311,17 @@ class ExpertTeamOrchestrator:
             user += "\n（本子任务无附带数据，请基于方法论与知识库给出分析；如必须依赖数据请说明需要哪些数据。）\n"
         try:
             res = self.llm.chat([{"role": "system", "content": sys}, {"role": "user", "content": user}], temperature=0.2)
-            return (res.text or "").strip() or "（该专家暂无产出）"
+            text = (res.text or "").strip()
+            if not text:
+                return "（该专家暂无产出）", False
+            return text, True
         except Exception as exc:  # noqa: BLE001
             logger.warning("expert %s analysis failed: %s", p.id, exc)
-            return f"（{p.name} 分析失败：{exc}）"
+            return f"（{p.name} 分析失败，请稍后重试。）", False
 
     # ------------------------------------------------------------ synthesis
 
-    def _synthesize(self, question: str, plan: str, results: list[dict[str, Any]], *, want_report: bool) -> str:
+    def _synthesize(self, question: str, plan: str, results: list[dict[str, Any]], *, want_report: bool) -> tuple[str, bool]:
         director = self.registry.director()
         spec = self.registry.knowledge_files().get("output-format-spec", "")[:1800]
         sys = (
@@ -307,25 +341,36 @@ class ExpertTeamOrchestrator:
         )
         try:
             res = self.llm.chat([{"role": "system", "content": sys}, {"role": "user", "content": user}], temperature=0.3)
-            return (res.text or "").strip() or body
+            text = (res.text or "").strip()
+            if text:
+                return text, True
+            # 模型返回空：退回各专家原文（信息不丢），但标记合成未成功。
+            return body, False
         except Exception as exc:  # noqa: BLE001
             logger.warning("expert_team synthesis failed: %s", exc)
-            # 合成失败兜底：把各专家产出拼起来，至少不丢信息
-            return "## 各专家分析（合成失败，原文如下）\n\n" + body
+            # 合成失败兜底：把各专家产出拼起来，至少不丢信息；但合成本身判失败。
+            return "## 各专家分析（报告合成未完成，原文如下）\n\n" + body, False
 
     # ----------------------------------------------------------- data fetch
 
     def _fetch_data(self, query: str, *, user_id: str, is_admin: bool) -> dict[str, Any]:
         """复用问数流水线取真实数据。失败/未接入时返回说明，不阻断专家分析。"""
-        out: dict[str, Any] = {"query": query, "rows": 0, "sql": "", "narrative": "", "table_preview": "", "for_prompt": ""}
+        out: dict[str, Any] = {"query": query, "rows": 0, "sql": "", "narrative": "", "table_preview": "",
+                               "for_prompt": "", "ok": True}
         if self.data_pipe is None:
+            out["ok"] = False
             out["for_prompt"] = f"（数据查询「{query}」未接入数据系统，请基于经验与口径定性分析）"
             return out
         try:
             r = self.data_pipe.run(query, user_id=user_id, is_admin=is_admin, skip_llm_narrative=False)
         except Exception as exc:  # noqa: BLE001
             logger.warning("expert_team data fetch failed: %s", exc)
-            out["for_prompt"] = f"（数据查询「{query}」执行失败：{exc}）"
+            out["ok"] = False
+            out["for_prompt"] = f"（数据查询「{query}」执行失败，请稍后重试。）"
+            return out
+        if not getattr(r, "ok", True):
+            out["ok"] = False
+            out["for_prompt"] = f"（数据查询「{query}」未取到有效数据，请基于经验与口径定性分析）"
             return out
         answer = getattr(r, "answer", None) or {}
         narrative = str(answer.get("narrative") or "")

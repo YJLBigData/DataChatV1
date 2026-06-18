@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { api, auth } from "../api";
+import { toast } from "../shared/toast";
 
 interface Props {
   open: boolean;
@@ -58,7 +59,7 @@ export function ReportDownloadModal({ open, onClose, onDownload }: Props) {
           <button onClick={onClose} className="rounded-xl border px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50" style={{borderColor:"#e6ecf6"}}>取消</button>
           <button onClick={async () => {
             setBusy(true);
-            try { await onDownload(chosen); onClose(); } catch (e: any) { alert("下载失败：" + (e?.message || e)); }
+            try { await onDownload(chosen); onClose(); } catch (e: any) { toast.error("下载失败：" + (e?.message || e)); }
             finally { setBusy(false); }
           }} disabled={busy} className="qq-btn-primary !px-4 !py-1.5 text-xs disabled:opacity-50">
             {busy ? "生成中…" : "生成并下载"}

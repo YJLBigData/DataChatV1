@@ -123,6 +123,7 @@ frontend/src/
 
 ```bash
 ./start_local.sh
+bash scripts/start_dev.sh
 ./start.sh
 ./start.sh --rebuild
 ./stop.sh

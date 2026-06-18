@@ -18,6 +18,8 @@ interface Props {
   onPushFeishu: () => Promise<{ ok: boolean; msg: string }>;
   onDownloadReport: () => Promise<{ ok: boolean; msg: string }>;
   onCopySql: () => void;
+  /** 导出 Excel：提交到导出队列（异步生成大表 XLSX）。 */
+  onExportExcel?: () => Promise<{ ok: boolean; msg: string }>;
   /** 答案反馈：up=采纳（沉淀为同域 few-shot 范例），down=不准（进 bad case 库） */
   onFeedback?: (vote: "up" | "down") => Promise<{ ok: boolean; msg: string }>;
 }
@@ -28,7 +30,7 @@ interface Props {
  *   - 中部：图表中心（默认列表，可切换 13 种图表，灰色 = 不支持）
  *   - 底部：口径详情、SQL、操作（复制 SQL / 推送飞书 / 下载 DOCX）+ 推荐追问
  */
-export function AnswerCard({ turn, onPickSuggestion, onPickClarify, onPushFeishu, onDownloadReport, onCopySql, onFeedback }: Props) {
+export function AnswerCard({ turn, onPickSuggestion, onPickClarify, onPushFeishu, onDownloadReport, onCopySql, onExportExcel, onFeedback }: Props) {
   const result = turn.result;
   const answer = result?.answer;
 
@@ -37,6 +39,7 @@ export function AnswerCard({ turn, onPickSuggestion, onPickClarify, onPushFeishu
   const [showDetail, setShowDetail] = useState(false);
   const [pushState, setPushState] = useState<{ msg: string; ok: boolean } | null>(null);
   const [reportState, setReportState] = useState<{ msg: string; ok: boolean } | null>(null);
+  const [exportState, setExportState] = useState<{ msg: string; ok: boolean } | null>(null);
   const [voted, setVoted] = useState<"up" | "down" | "">("");
   const [voteMsg, setVoteMsg] = useState("");
 
@@ -247,6 +250,20 @@ export function AnswerCard({ turn, onPickSuggestion, onPickClarify, onPushFeishu
             >
               {reportState?.msg ?? "下载报告"}
             </button>
+            {onExportExcel && (
+              <button
+                className="qq-btn px-2 py-1 text-xs"
+                onClick={async () => {
+                  setExportState({ msg: "提交中…", ok: true });
+                  const r = await onExportExcel();
+                  setExportState(r);
+                  setTimeout(() => setExportState(null), 4000);
+                }}
+                title="导出 Excel（加入导出队列）"
+              >
+                {exportState?.msg ?? "导出 Excel"}
+              </button>
+            )}
           </div>
         </div>
 

@@ -4,6 +4,8 @@ interface Props {
   user: AuthUser;
   current: PageId;
   onChange: (page: PageId) => void;
+  /** 各页未读红点（如专家团后台分析完成但用户未查看）。 */
+  badges?: Partial<Record<PageId, boolean>>;
 }
 
 interface Item {
@@ -28,7 +30,7 @@ const ITEMS: Item[] = [
 ];
 
 /** 左侧主导航。普通用户只看 chat，管理员看全部。 */
-export function Sidebar({ user, current, onChange }: Props) {
+export function Sidebar({ user, current, onChange, badges }: Props) {
   const items = ITEMS.filter((i) => !i.adminOnly || user.role === "admin");
   return (
     <aside
@@ -39,6 +41,7 @@ export function Sidebar({ user, current, onChange }: Props) {
       <div className="my-3 h-px w-8 bg-slate-100" />
       {items.map((it) => {
         const active = it.id === current;
+        const dot = !!badges?.[it.id] && !active;
         return (
           <button
             key={it.id}
@@ -51,6 +54,12 @@ export function Sidebar({ user, current, onChange }: Props) {
                 : "text-slate-500 hover:bg-slate-50 hover:text-slate-700"
             }`}
           >
+            {dot && (
+              <span
+                title="有新结果未查看"
+                className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white"
+              />
+            )}
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
               <path d={it.iconPath} strokeLinecap="round" strokeLinejoin="round" />
             </svg>

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../../api";
+import { toast } from "../../shared/toast";
+import { confirmDialog, promptDialog } from "../../shared/dialog";
 import type { AuthUser } from "../../types";
 
 /** 用户管理（仅管理员）— 创建 / 列表 / 重置密码 / 删除。
@@ -31,8 +33,8 @@ export function UsersPage() {
   );
 
   async function create() {
-    if (!newUsername.trim()) { alert("用户名不能为空"); return; }
-    if (newPassword && newPassword.length < 8) { alert("密码至少 8 位（或留空让系统随机生成）"); return; }
+    if (!newUsername.trim()) { toast.error("用户名不能为空"); return; }
+    if (newPassword && newPassword.length < 8) { toast.error("密码至少 8 位（或留空让系统随机生成）"); return; }
     try {
       const r = await api.createUser(newUsername.trim(), newPassword || null, newRole, newEmail.trim());
       setNewUsername(""); setNewPassword(""); setNewEmail(""); setNewRole("user");
@@ -40,35 +42,40 @@ export function UsersPage() {
       if (r.one_time_password) {
         setLastOtp({ username: r.username, password: r.one_time_password });
       } else {
-        alert(`已创建 ${r.username}`);
+        toast.success(`已创建 ${r.username}`);
       }
-    } catch (e: any) { alert("创建失败: " + (e?.message || e)); }
+    } catch (e: any) { toast.error("创建失败: " + (e?.message || e)); }
   }
   async function resetPwd(u: AuthUser) {
-    const choice = confirm(`重置 ${u.username} 的密码：\n· 确定 = 系统随机生成强密码\n· 取消 = 我自己输入`);
-    if (choice) {
+    const random = await confirmDialog({
+      title: `重置 ${u.username} 的密码`,
+      message: "选择重置方式：\n· 确定 = 系统随机生成强密码\n· 自己输入 = 手动设置",
+      confirmText: "随机生成", cancelText: "自己输入",
+    });
+    if (random) {
       try {
         const r = await api.resetPassword(u.username, null, true);
         if (r.one_time_password) setLastOtp({ username: u.username, password: r.one_time_password });
-      } catch (e: any) { alert("失败: " + (e?.message || e)); }
+      } catch (e: any) { toast.error("失败: " + (e?.message || e)); }
     } else {
-      const p = prompt(`为 ${u.username} 设置新密码（至少 8 位，含字母+数字）`);
-      if (!p || p.length < 8) return;
-      try { await api.resetPassword(u.username, p, true); alert("已重置"); }
-      catch (e: any) { alert("失败: " + (e?.message || e)); }
+      const p = await promptDialog({ title: `为 ${u.username} 设置新密码`, label: "至少 8 位，含字母+数字", placeholder: "新密码" });
+      if (p == null) return;
+      if (p.length < 8) { toast.error("密码至少 8 位"); return; }
+      try { await api.resetPassword(u.username, p, true); toast.success("已重置"); }
+      catch (e: any) { toast.error("失败: " + (e?.message || e)); }
     }
   }
   async function remove(u: AuthUser) {
-    if (u.username === "admin") { alert("不能删除默认管理员"); return; }
-    if (!confirm(`确定删除用户 ${u.username} ?`)) return;
+    if (u.username === "admin") { toast.error("不能删除默认管理员"); return; }
+    if (!(await confirmDialog({ message: `确定删除用户 ${u.username} ?`, danger: true }))) return;
     try { await api.deleteUser(u.username); await refresh(); }
-    catch (e: any) { alert("失败: " + (e?.message || e)); }
+    catch (e: any) { toast.error("失败: " + (e?.message || e)); }
   }
   async function toggleActive(u: AuthUser) {
     const next = !(u.is_active ?? true);
-    if (!next && !confirm(`确定停用 ${u.username}？停用后该用户立即无法登录、现有会话立即失效。`)) return;
+    if (!next && !(await confirmDialog({ message: `确定停用 ${u.username}？停用后该用户立即无法登录、现有会话立即失效。`, danger: true }))) return;
     try { await api.setUserActive(u.username, next); await refresh(); }
-    catch (e: any) { alert("失败: " + (e?.message || e)); }
+    catch (e: any) { toast.error("失败: " + (e?.message || e)); }
   }
 
   return (

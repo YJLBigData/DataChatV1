@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { api, auth } from "../api";
+import { toast } from "../shared/toast";
 
 interface Props {
   open: boolean;
@@ -43,7 +44,7 @@ export function PasswordModal({ open, onClose, onChanged }: Props) {
       onChanged();
       onClose();
       // 安全（P1）：改密后后端已吊销旧 token，必须强制重新登录（不再沿用旧会话）。
-      alert("密码已更新，请使用新密码重新登录");
+      toast.success("密码已更新，请使用新密码重新登录");
       auth.clear();
       window.dispatchEvent(new CustomEvent("datachat:unauthorized"));
     } catch (e: any) {

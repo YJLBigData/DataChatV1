@@ -286,7 +286,44 @@ export interface ExpertTeamResult {
   experts: ExpertContribution[];
   report: string;
   elapsed_ms: number;
+  /** 部分环节降级提示（某专家取数/分析未成功，但整体仍出了结论）。 */
+  warnings?: string[];
   events?: { stage: string; [k: string]: any }[];
+}
+
+/** 专家团一轮对话（前端 UI 态）：问题 + 后台 job 进度 / 最终结果。 */
+export interface ExpertTurn {
+  id: string;
+  question: string;
+  pending: boolean;
+  jobId?: string;
+  events?: { stage: string; [k: string]: any }[];
+  result?: ExpertTeamResult;
+  error?: string;
+}
+
+/** 数据导出 job（XLSX 异步导出队列）。 */
+export interface ExportJob {
+  id: string;
+  question: string;
+  status: "queued" | "running" | "ready" | "error" | "expired";
+  filename: string;
+  row_count: number;
+  truncated: boolean;
+  error: string;
+  created_at: number;
+  updated_at: number;
+  expires_at: number;
+}
+
+/** 轮询 GET /api/expert-team/jobs/{id} 的返回。 */
+export interface ExpertJob {
+  ok: boolean;
+  status?: "running" | "done" | "error" | "missing";
+  error?: string;
+  conversation_id?: string;
+  events?: { stage: string; [k: string]: any }[];
+  result?: ExpertTeamResult | null;
 }
 
 export interface LLMSettingItem {

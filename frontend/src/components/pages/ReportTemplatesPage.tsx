@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { api, auth } from "../../api";
+import { toast } from "../../shared/toast";
+import { confirmDialog } from "../../shared/dialog";
 import type { AuthUser } from "../../types";
 
 /** 报告提示词模板管理 — 用户隔离：
@@ -37,18 +39,19 @@ export function ReportTemplatesPage() {
 
   async function save() {
     if (!edit) return;
-    if (!edit.name?.trim() || !edit.prompt?.trim()) { alert("名称和提示词都不能为空"); return; }
+    if (!edit.name?.trim() || !edit.prompt?.trim()) { toast.error("名称和提示词都不能为空"); return; }
     try {
       if (edit.id) await api.updateReportTemplate(edit.id, { name: edit.name, prompt: edit.prompt, is_default: !!edit.is_default });
       else await api.createReportTemplate(edit.name, edit.prompt, !!edit.is_default, isAdmin && !!edit.system);
       setEdit(null);
       await refresh();
-    } catch (e: any) { alert("失败：" + (e?.message || e)); }
+      toast.success("已保存");
+    } catch (e: any) { toast.error("失败：" + (e?.message || e)); }
   }
   async function remove(id: string) {
-    if (!confirm("确定删除此模板？")) return;
+    if (!(await confirmDialog({ message: "确定删除此模板？", danger: true }))) return;
     try { await api.deleteReportTemplate(id); await refresh(); }
-    catch (e: any) { alert("失败：" + (e?.message || e)); }
+    catch (e: any) { toast.error("失败：" + (e?.message || e)); }
   }
 
   return (

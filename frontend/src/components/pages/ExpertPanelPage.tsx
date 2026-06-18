@@ -9,206 +9,42 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, friendlyError } from "../../api";
-import type { AuthUser, ExpertCard, ExpertTeamBootstrap, ExpertTeamResult } from "../../types";
+import { toast } from "../../shared/toast";
+import { confirmDialog } from "../../shared/dialog";
+import { MemberCard } from "../expert/MemberCard";
+import { MemberEditor, EMPTY_EDITOR, type EditorState } from "../expert/MemberEditor";
+import { ResultCard } from "../expert/ResultCard";
+import type { ExpertTeamHook } from "../../hooks/useExpertTeam";
+import type { AuthUser, ExpertCard, ExpertTeamBootstrap, ExpertTurn } from "../../types";
 
-function uid(): string {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+interface Props { user: AuthUser; llmProvider?: string | null; expert: ExpertTeamHook }
+
+/** 把后台 job 的进度事件翻译成一句中文忙碌提示。 */
+function busyText(t: ExpertTurn): string {
+  const ev = t.events && t.events[t.events.length - 1];
+  if (!ev) return "专家团协同中…";
+  if (ev.stage === "director" && ev.status === "routing") return "决策调度总监正在规划…";
+  if (ev.stage === "director" && ev.status === "planned") return "已规划调度，专家开始分析…";
+  if (ev.stage === "expert" && ev.status === "start") return `${ev.name || "专家"} 分析中…`;
+  if (ev.stage === "expert" && ev.status === "data") return "正在取数…";
+  if (ev.stage === "director" && ev.status === "synthesizing") return "总监正在合成报告…";
+  return "专家团协同中…";
 }
-
-interface Turn { id: string; question: string; pending: boolean; result?: ExpertTeamResult; error?: string }
-interface Props { user: AuthUser; llmProvider?: string | null }
-
-/* ----------------------------- 轻量 markdown 渲染（无依赖、纯 React 节点，避免 XSS） --------------------------- */
-function inlineBold(text: string, keyPrefix: string) {
-  const parts = text.split(/(\*\*[^*]+\*\*)/g);
-  return parts.map((p, i) =>
-    /^\*\*[^*]+\*\*$/.test(p)
-      ? <strong key={`${keyPrefix}-b${i}`} className="font-semibold text-slate-800">{p.slice(2, -2)}</strong>
-      : <span key={`${keyPrefix}-t${i}`}>{p}</span>,
-  );
-}
-
-function MiniMarkdown({ text }: { text: string }) {
-  const lines = (text || "").replace(/\r/g, "").split("\n");
-  const nodes: JSX.Element[] = [];
-  let list: string[] = [];
-  let tableRows: string[][] = [];
-  const flushList = () => {
-    if (!list.length) return;
-    nodes.push(
-      <ul key={`ul-${nodes.length}`} className="my-1 ml-4 list-disc space-y-0.5 text-[13px] text-slate-600">
-        {list.map((it, i) => <li key={i}>{inlineBold(it, `li${nodes.length}-${i}`)}</li>)}
-      </ul>,
-    );
-    list = [];
-  };
-  const flushTable = () => {
-    if (!tableRows.length) return;
-    const [head, ...body] = tableRows;
-    nodes.push(
-      <div key={`tb-${nodes.length}`} className="my-2 overflow-x-auto">
-        <table className="w-full border-collapse text-[12px]">
-          <thead><tr>{head.map((h, i) => <th key={i} className="border-b border-slate-200 px-2 py-1 text-left font-medium text-slate-500">{h}</th>)}</tr></thead>
-          <tbody>{body.map((r, ri) => <tr key={ri}>{r.map((c, ci) => <td key={ci} className="border-b border-slate-100 px-2 py-1 text-slate-600">{c}</td>)}</tr>)}</tbody>
-        </table>
-      </div>,
-    );
-    tableRows = [];
-  };
-  for (const raw of lines) {
-    const line = raw.trimEnd();
-    if (/^\s*\|.*\|\s*$/.test(line)) {
-      const cells = line.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
-      if (cells.every((c) => /^-{2,}:?$|^:?-{2,}:?$/.test(c) || c === "")) continue;
-      flushList();
-      tableRows.push(cells);
-      continue;
-    }
-    flushTable();
-    if (/^#{1,6}\s/.test(line)) {
-      flushList();
-      const level = line.match(/^#+/)![0].length;
-      const txt = line.replace(/^#+\s/, "");
-      const cls = level <= 1 ? "text-[15px] font-semibold text-slate-800 mt-2"
-        : level === 2 ? "text-[14px] font-semibold text-slate-800 mt-2"
-        : "text-[13px] font-semibold text-slate-700 mt-1.5";
-      nodes.push(<div key={`h-${nodes.length}`} className={cls}>{inlineBold(txt, `h${nodes.length}`)}</div>);
-    } else if (/^\s*[-*]\s+/.test(line)) {
-      list.push(line.replace(/^\s*[-*]\s+/, ""));
-    } else if (/^\s*\d+\.\s+/.test(line)) {
-      list.push(line.replace(/^\s*\d+\.\s+/, ""));
-    } else if (line.trim() === "") {
-      flushList();
-    } else {
-      flushList();
-      nodes.push(<p key={`p-${nodes.length}`} className="my-1 text-[13px] leading-relaxed text-slate-600">{inlineBold(line, `p${nodes.length}`)}</p>);
-    }
-  }
-  flushList(); flushTable();
-  return <div className="qq-md">{nodes}</div>;
-}
-
-function ExpertBlock({ c }: { c: ExpertTeamResult["experts"][number] }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="rounded-xl border border-slate-100 bg-white">
-      <div className="flex items-start gap-2.5 px-3.5 py-2.5">
-        <div className="text-lg leading-none">{c.emoji}</div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="text-[13px] font-medium text-slate-800">{c.name}</span>
-            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">{c.profession}</span>
-          </div>
-          {c.subtask ? <div className="mt-0.5 truncate text-[11px] text-slate-400">子任务：{c.subtask}</div> : null}
-          <div className="mt-1.5"><MiniMarkdown text={c.analysis} /></div>
-          {c.data && (c.data.sql || c.data.table_preview) ? (
-            <div className="mt-1.5">
-              <button type="button" onClick={() => setOpen((v) => !v)} className="text-[11px] text-blue-500 hover:underline">
-                {open ? "收起数据" : `查看取数明细${c.data.rows ? `（${c.data.rows} 行）` : ""}`}
-              </button>
-              {open ? (
-                <div className="mt-1 space-y-1">
-                  {c.data.table_preview ? <pre className="overflow-x-auto rounded bg-slate-50 p-2 text-[11px] text-slate-600">{c.data.table_preview}</pre> : null}
-                  {c.data.sql ? <pre className="overflow-x-auto rounded bg-slate-900/90 p-2 text-[11px] text-slate-100">{c.data.sql}</pre> : null}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ResultCard({ result }: { result: ExpertTeamResult }) {
-  if (!result.ok) return <div className="qq-card px-4 py-3 text-sm text-rose-500">{result.error || "调度失败"}</div>;
-  return (
-    <div className="space-y-3">
-      {result.plan ? (
-        <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-3.5 py-2.5">
-          <div className="flex items-center gap-1.5 text-[12px] font-medium text-blue-600">
-            <span>🧭 决策调度总监</span>
-            <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px]">{result.route === "fast" ? "快通道" : "慢通道·多专家"}</span>
-          </div>
-          <div className="mt-1 text-[12.5px] text-slate-600">{result.plan}</div>
-        </div>
-      ) : null}
-      {result.experts.length > 0 ? (
-        <div className="space-y-2">
-          <div className="text-[11px] font-medium text-slate-400">专家产出（{result.experts.length}）</div>
-          {result.experts.map((c) => <ExpertBlock key={c.id} c={c} />)}
-        </div>
-      ) : null}
-      <div className="qq-card px-4 py-3">
-        <div className="mb-1 flex items-center gap-1.5 text-[12px] font-semibold text-slate-700">📋 合成报告</div>
-        <MiniMarkdown text={result.report} />
-      </div>
-      {result.elapsed_ms ? <div className="text-right text-[10px] text-slate-300">耗时 {(result.elapsed_ms / 1000).toFixed(1)}s</div> : null}
-    </div>
-  );
-}
-
-/* ----------------------------- 成员卡片（可选 + 编辑 + 删除/隐藏） ----------------------------- */
-function MemberCard({ m, selected, onToggle, onEdit, onDelete }: {
-  m: ExpertCard; selected: boolean;
-  onToggle: () => void; onEdit: () => void; onDelete: () => void;
-}) {
-  return (
-    <div
-      onClick={onToggle}
-      className={`group relative flex cursor-pointer items-start gap-3 rounded-xl border px-3.5 py-2.5 text-left transition ${
-        selected ? "border-blue-300 bg-blue-50/60" : "border-slate-100 bg-white hover:border-slate-200"
-      }`}
-    >
-      <div className="text-xl leading-none">{m.emoji}</div>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[13px] font-medium text-slate-800">{m.name}</span>
-          {!m.is_builtin ? <span className="rounded bg-amber-100 px-1 text-[10px] text-amber-600">自建</span> : null}
-          {m.has_override ? <span className="rounded bg-violet-100 px-1 text-[10px] text-violet-600">已改</span> : null}
-          {selected ? <span className="text-[11px] text-blue-500">✓</span> : null}
-        </div>
-        <div className="mt-0.5 text-[11.5px] text-slate-500">{m.profession}</div>
-      </div>
-      {/* 行内操作：编辑 / 删除（hover 显现），stopPropagation 避免触发勾选 */}
-      <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
-        <button type="button" title="编辑" onClick={(e) => { e.stopPropagation(); onEdit(); }}
-          className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-blue-500">✎</button>
-        {m.deletable !== false ? (
-          <button type="button" title={m.is_builtin ? "隐藏（可还原）" : "删除"} onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-rose-500">🗑</button>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-type EditorState = {
-  open: boolean;
-  mode: "create" | "edit";
-  id?: string;
-  name: string; profession: string; emoji: string; instructions: string;
-  isBuiltin: boolean; isDirector: boolean; hasOverride: boolean;
-  loading: boolean; saving: boolean; err: string;
-};
-const EMPTY_EDITOR: EditorState = {
-  open: false, mode: "create", name: "", profession: "", emoji: "✨", instructions: "",
-  isBuiltin: false, isDirector: false, hasOverride: false, loading: false, saving: false, err: "",
-};
 
 /* ===================================================================== 主页面 */
-export function ExpertPanelPage({ user, llmProvider }: Props) {
+export function ExpertPanelPage({ user, llmProvider, expert }: Props) {
+  void user;  // 暂未在本页直接使用，保留以备权限/个性化扩展
   const [boot, setBoot] = useState<ExpertTeamBootstrap | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
   const [wantReport, setWantReport] = useState(false);
   const [composing, setComposing] = useState(false);
   const [editor, setEditor] = useState<EditorState>(EMPTY_EDITOR);
-  const [busyMsg, setBusyMsg] = useState("");
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  // 会话轮次/进行态来自 App 级 hook（切页/刷新不中断；红点统一管理）。
+  const turns = expert.turns;
+  const activeBusy = turns.some((t) => t.pending);
 
   const reload = useCallback(async () => {
     try { setBoot(await api.expertTeamBootstrap()); } catch { /* 静默：仍可问数 */ }
@@ -270,31 +106,28 @@ export function ExpertPanelPage({ user, llmProvider }: Props) {
 
   const deleteMember = useCallback(async (m: ExpertCard) => {
     const msg = m.is_builtin ? `隐藏内置专家「${m.name}」？（可在编辑里还原默认）` : `删除自建技能「${m.name}」？`;
-    if (!window.confirm(msg)) return;
+    if (!(await confirmDialog({ title: "确认", message: msg, danger: true }))) return;
     try { await api.expertTeamDeleteMember(m.id); setSelected((p) => { const n = new Set(p); n.delete(m.id); return n; }); reload(); }
-    catch { /* ignore */ }
+    catch (e: any) { toast.error("删除失败：" + (e?.message || e)); }
   }, [reload]);
 
-  /* ----- 提问编排 ----- */
+  /* ----- 提问编排（提交到服务端后台任务，切页/刷新不中断） ----- */
   const submit = useCallback(async (q?: string) => {
     const question = (q ?? input).trim();
-    if (!question || loading) return;
+    if (!question || activeBusy) return;
     setInput("");
-    const turnId = uid();
-    setTurns((p) => [...p, { id: turnId, question, pending: true }]);
-    setLoading(true); setBusyMsg("决策调度总监正在规划…"); scrollDown();
-    try {
-      const result = await api.expertTeamChat({
-        question,
-        expert_ids: selected.size ? [...selected] : null,
-        want_report: wantReport,
-        llm_provider: llmProvider ?? undefined,
-      });
-      setTurns((p) => p.map((t) => (t.id === turnId ? { ...t, pending: false, result } : t)));
-    } catch (e: any) {
-      setTurns((p) => p.map((t) => (t.id === turnId ? { ...t, pending: false, error: friendlyError(e) } : t)));
-    } finally { setLoading(false); setBusyMsg(""); scrollDown(); }
-  }, [input, loading, selected, wantReport, llmProvider, scrollDown]);
+    scrollDown();
+    const r = await expert.submit(question, {
+      expert_ids: selected.size ? [...selected] : null,
+      want_report: wantReport,
+      llm_provider: llmProvider ?? undefined,
+    });
+    if (!r.ok && r.error) toast.error(r.error);
+    scrollDown();
+  }, [input, activeBusy, selected, wantReport, llmProvider, expert, scrollDown]);
+
+  // 轮次变化（含后台轮询写回结果）时滚到底
+  useEffect(() => { scrollDown(); }, [turns, scrollDown]);
 
   const empty = turns.length === 0;
 
@@ -366,7 +199,12 @@ export function ExpertPanelPage({ user, llmProvider }: Props) {
                 {t.pending ? (
                   <div className="flex items-center gap-2 text-sm text-slate-400">
                     <span className="qq-loading-dot" /><span className="qq-loading-dot" /><span className="qq-loading-dot" />
-                    <span className="ml-1">{busyMsg || "专家团协同中…"}</span>
+                    <span className="ml-1">{busyText(t)}</span>
+                    <span className="ml-1 text-[11px] text-slate-300">· 可切到别的页面，分析在后台继续</span>
+                    {expert.activeId ? (
+                      <button type="button" onClick={() => expert.cancel(expert.activeId!)}
+                        className="ml-1 rounded border border-slate-200 px-1.5 py-0.5 text-[11px] text-slate-400 hover:border-rose-200 hover:text-rose-500">终止</button>
+                    ) : null}
                   </div>
                 ) : t.error ? (
                   <div className="qq-card px-4 py-3 text-sm text-rose-500">{t.error}</div>
@@ -391,61 +229,26 @@ export function ExpertPanelPage({ user, llmProvider }: Props) {
           <div className="qq-card flex items-end gap-2 px-3 py-2">
             <textarea
               ref={taRef} value={input} onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => { if (!composing && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!loading && input.trim()) submit(); } }}
+              onKeyDown={(e) => { if (!composing && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!activeBusy && input.trim()) submit(); } }}
               onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)}
               rows={1} placeholder="向专家团提问，例如：东一区达成率低于90%的省区和渠道，做归因诊断"
               className="max-h-[140px] min-h-[44px] flex-1 resize-none bg-transparent px-1 py-2 text-sm text-slate-700 outline-none placeholder:text-slate-300"
             />
-            <button type="button" onClick={() => submit()} disabled={loading || !input.trim()}
-              className="qq-btn-primary shrink-0 px-4 py-2 text-sm disabled:opacity-40">{loading ? "调度中…" : "发送"}</button>
+            <button type="button" onClick={() => submit()} disabled={activeBusy || !input.trim()}
+              className="qq-btn-primary shrink-0 px-4 py-2 text-sm disabled:opacity-40">{activeBusy ? "调度中…" : "发送"}</button>
           </div>
           <div className="mt-1.5 text-center text-[11px] text-slate-300">总监调度 · 多专家协同 · 数据可追溯</div>
         </div>
       </div>
 
       {/* 成员编辑器（新建 / 编辑内置专家或自建技能） */}
-      {editor.open ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4" onClick={() => setEditor(EMPTY_EDITOR)}>
-          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-[15px] font-semibold text-slate-800">
-                {editor.mode === "create" ? "新建技能 / 专家" : editor.isDirector ? "编辑决策调度总监" : editor.isBuiltin ? "编辑内置专家" : "编辑技能"}
-              </div>
-              {editor.isBuiltin && editor.hasOverride ? <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] text-violet-600">已改</span> : null}
-            </div>
-            {editor.loading ? (
-              <div className="py-10 text-center text-sm text-slate-400">加载中…</div>
-            ) : (
-              <div className="space-y-3">
-                <div className="flex gap-2">
-                  <input value={editor.emoji} onChange={(e) => setEditor((s) => ({ ...s, emoji: e.target.value }))}
-                    className="w-16 rounded-lg border border-slate-200 px-2 py-2 text-center text-sm" placeholder="✨" />
-                  <input value={editor.name} onChange={(e) => setEditor((s) => ({ ...s, name: e.target.value }))}
-                    className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm" placeholder="名称，如：促销ROI专家" />
-                </div>
-                <input value={editor.profession} onChange={(e) => setEditor((s) => ({ ...s, profession: e.target.value }))}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" placeholder="角色定位，如：促销活动效果分析" />
-                <textarea value={editor.instructions} onChange={(e) => setEditor((s) => ({ ...s, instructions: e.target.value }))}
-                  rows={7} className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" placeholder="该专家的分析方法论 / 关注点 / 输出要求（作为 system 指令）" />
-                {editor.err ? <div className="rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-600">{editor.err}</div> : null}
-              </div>
-            )}
-            <div className="mt-4 flex items-center justify-between gap-2">
-              <div>
-                {editor.mode === "edit" && editor.isBuiltin && editor.hasOverride ? (
-                  <button type="button" onClick={resetMember} disabled={editor.saving}
-                    className="qq-btn px-3 py-1.5 text-sm text-slate-500 disabled:opacity-40">还原默认</button>
-                ) : null}
-              </div>
-              <div className="flex gap-2">
-                <button type="button" onClick={() => setEditor(EMPTY_EDITOR)} className="qq-btn px-3 py-1.5 text-sm">取消</button>
-                <button type="button" onClick={saveEditor} disabled={editor.saving || editor.loading || !editor.name.trim()}
-                  className="qq-btn-primary px-3 py-1.5 text-sm disabled:opacity-40">{editor.saving ? "保存中…" : "保存"}</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <MemberEditor
+        editor={editor}
+        setEditor={setEditor}
+        onSave={saveEditor}
+        onReset={resetMember}
+        onCancel={() => setEditor(EMPTY_EDITOR)}
+      />
     </>
   );
 }

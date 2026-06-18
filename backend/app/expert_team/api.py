@@ -16,12 +16,15 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.api.deps import require_user
 from app.core.auth import User
+from app.core.folders import FolderNotFound
 
+from .history import get_expert_conversation_store, get_expert_folders_store
+from .jobs import get_expert_job_manager
 from .members import list_members, member_detail, split_for_orchestrator
 from .orchestrator import get_orchestrator
 from .registry import get_registry
@@ -52,6 +55,34 @@ class TeamChatReq(BaseModel):
     want_report: bool = False
     llm_provider: Optional[str] = None
     conversation_id: Optional[str] = None
+
+
+# ---- 会话历史 + 文件夹（与问数完全独立的专家团专属存储）----
+class ConvCreateReq(BaseModel):
+    title: str = "新会话"
+
+
+class ConvRenameReq(BaseModel):
+    title: str = "新会话"
+
+
+class FolderCreateReq(BaseModel):
+    name: str = "未命名"
+    color: str = ""
+
+
+class FolderRenameReq(BaseModel):
+    name: str
+    color: Optional[str] = None
+
+
+class CollectReq(BaseModel):
+    conversation_id: str
+    folder_id: str
+
+
+class MembershipReq(BaseModel):
+    conversation_ids: list[str] = []
 
 
 def _is_custom(member_id: str) -> bool:
@@ -176,3 +207,218 @@ def team_chat(req: TeamChatReq = Body(...), user: User = Depends(require_user)) 
     except Exception:  # noqa: BLE001
         pass
     return result
+
+
+# ===================================================== 后台编排（异步 job）
+
+@router.post("/chat/async")
+def team_chat_async(req: TeamChatReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
+    """提交一次专家团编排为**服务端后台任务**，立即返回 job_id + conversation_id。
+
+    切页/刷新/关页都不会中断分析（线程池在后台跑，结果落库到专家团会话）。
+    前端轮询 GET /jobs/{job_id} 取进度与最终结果；完成后在左侧会话/导航打红点。
+    """
+    question = (req.question or "").strip()
+    if not question:
+        return {"ok": False, "error": "请输入问题"}
+
+    conv_store = get_expert_conversation_store()
+    cid = req.conversation_id
+    if cid:
+        s = conv_store.get_session(cid)
+        if not s or s.user_id != user.id:
+            return {"ok": False, "error": "会话不存在或无权访问"}
+    else:
+        s = conv_store.create_session(user.id, title=(question[:30] or "新会话"))
+        cid = s.id
+
+    # 先取既有历史（不含当前问题）供多轮上下文，再落当前 user 消息（保证 user 先于 assistant）
+    from .jobs import JobRejected
+    history = conv_store.history_for_llm(cid, limit=6)
+    conv_store.append_message(
+        cid, "user", question,
+        payload={"expert_ids": req.expert_ids or [], "want_report": bool(req.want_report)},
+    )
+    try:
+        job_id = get_expert_job_manager().submit(
+            conversation_id=cid,
+            user_id=user.id,
+            is_admin=(user.role == "admin"),
+            question=question,
+            expert_ids=req.expert_ids,
+            want_report=bool(req.want_report),
+            llm_provider=req.llm_provider,
+            history=history,
+        )
+    except JobRejected as exc:
+        # 背压拒绝：在会话里留一条 assistant 提示（而非悬空的提问），刷新后也能看到
+        conv_store.append_message(cid, "assistant", exc.message,
+                                  payload={"result": {"ok": False, "error": exc.message}})
+        return {"ok": False, "error": exc.message, "conversation_id": cid}
+    return {"ok": True, "job_id": job_id, "conversation_id": cid}
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, user: User = Depends(require_user)) -> dict[str, Any]:
+    """取消后台编排：排队中即时取消；运行中 best-effort（跑完丢弃结果）。"""
+    ok = get_expert_job_manager().cancel(job_id, user.id)
+    return {"ok": ok}
+
+
+@router.get("/jobs")
+def list_jobs(user: User = Depends(require_user), status: Optional[str] = None) -> dict[str, Any]:
+    """列出当前用户的后台编排（默认 active=queued|running）—— 前端刷新后据此重挂红点/进度。
+    含**排队中**的 job（此前只取 running 会漏掉刚提交还没轮到的分析）。"""
+    items = get_expert_job_manager().list_for_user(user.id, status=status or "active")
+    return {"ok": True, "items": items}
+
+
+@router.get("/jobs/{job_id}")
+def get_job(job_id: str, user: User = Depends(require_user)) -> dict[str, Any]:
+    """轮询后台编排状态。job 不存在（服务重启/过期）→ status=missing，
+    前端据此把对应轮标记为"分析已中断，请重试"，而非一直转圈。"""
+    snap = get_expert_job_manager().get(job_id, user_id=user.id)
+    if not snap:
+        return {"ok": False, "status": "missing", "error": "任务不存在或已过期（可能服务已重启）"}
+    return {"ok": True, **snap}
+
+
+# ===================================================== 会话历史（专家团专属）
+
+@router.post("/conversations")
+def conv_create(req: ConvCreateReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
+    s = get_expert_conversation_store().create_session(user.id, title=req.title)
+    return {"id": s.id, "title": s.title, "created_at": s.created_at, "updated_at": s.updated_at}
+
+
+@router.get("/conversations")
+def conv_list(user: User = Depends(require_user)) -> dict[str, Any]:
+    items = get_expert_conversation_store().list_sessions(user.id)
+    return {"items": [{"id": s.id, "title": s.title, "created_at": s.created_at, "updated_at": s.updated_at} for s in items]}
+
+
+@router.get("/conversations/{cid}")
+def conv_get(cid: str, user: User = Depends(require_user)) -> dict[str, Any]:
+    store = get_expert_conversation_store()
+    s = store.get_session(cid)
+    if not s or s.user_id != user.id:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    msgs = store.list_messages(cid)
+    return {
+        "id": s.id, "title": s.title, "created_at": s.created_at, "updated_at": s.updated_at,
+        "messages": [
+            {"id": m.id, "role": m.role, "content": m.content, "payload": m.payload, "created_at": m.created_at}
+            for m in msgs
+        ],
+    }
+
+
+@router.patch("/conversations/{cid}")
+def conv_rename(cid: str, req: ConvRenameReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
+    store = get_expert_conversation_store()
+    s = store.get_session(cid)
+    if not s or s.user_id != user.id:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    store.rename_session(cid, req.title or "新会话")
+    return {"ok": True}
+
+
+@router.delete("/conversations/{cid}")
+def conv_delete(cid: str, user: User = Depends(require_user)) -> dict[str, Any]:
+    store = get_expert_conversation_store()
+    s = store.get_session(cid)
+    if not s or s.user_id != user.id:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    store.delete_session(cid)
+    # 顺带解除该会话在所有文件夹里的收藏（与问数 delete_folder 语义一致：不留悬挂收藏）
+    try:
+        fstore = get_expert_folders_store()
+        for fid in fstore.folder_ids_for_conversation(user.id, cid):
+            fstore.remove(user.id, cid, fid)
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True}
+
+
+# ===================================================== 文件夹 + 收藏（专家团专属）
+
+@router.get("/folders")
+def folders_list(user: User = Depends(require_user)) -> dict[str, Any]:
+    items = get_expert_folders_store().list_folders(user.id)
+    return {"items": [{"id": f.id, "name": f.name, "color": f.color, "created_at": f.created_at} for f in items]}
+
+
+@router.post("/folders")
+def folders_create(req: FolderCreateReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
+    f = get_expert_folders_store().create_folder(user.id, req.name, req.color)
+    return {"id": f.id, "name": f.name, "color": f.color, "created_at": f.created_at}
+
+
+@router.patch("/folders/{folder_id}")
+def folders_rename(folder_id: str, req: FolderRenameReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
+    try:
+        get_expert_folders_store().rename_folder(user.id, folder_id, req.name, req.color)
+    except FolderNotFound:
+        raise HTTPException(status_code=404, detail="文件夹不存在或无权限")
+    return {"ok": True}
+
+
+@router.delete("/folders/{folder_id}")
+def folders_delete(folder_id: str, user: User = Depends(require_user)) -> dict[str, Any]:
+    try:
+        get_expert_folders_store().delete_folder(user.id, folder_id)
+    except FolderNotFound:
+        raise HTTPException(status_code=404, detail="文件夹不存在或无权限")
+    return {"ok": True}
+
+
+@router.get("/folders/{folder_id}/conversations")
+def folder_conversations(folder_id: str, user: User = Depends(require_user)) -> dict[str, Any]:
+    fstore = get_expert_folders_store()
+    conv_store = get_expert_conversation_store()
+    out: list[dict[str, Any]] = []
+    for it in fstore.list_collections(user.id, folder_id=folder_id):
+        s = conv_store.get_session(it.conversation_id)
+        if not s:
+            continue
+        out.append({"id": s.id, "title": s.title, "created_at": s.created_at,
+                    "updated_at": s.updated_at, "collected_at": it.created_at})
+    return {"items": out}
+
+
+@router.post("/conversations/{cid}/collect")
+def conv_collect(cid: str, req: CollectReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
+    if cid != req.conversation_id:
+        raise HTTPException(status_code=400, detail="conversation_id 不一致")
+    if not (req.folder_id or "").strip():
+        raise HTTPException(status_code=422, detail="folder_id 不能为空")
+    s = get_expert_conversation_store().get_session(cid)
+    if not s or s.user_id != user.id:
+        raise HTTPException(status_code=404, detail="会话不存在或无权限")
+    store = get_expert_folders_store()
+    # 归属校验：目标文件夹必须存在且属于该用户，杜绝悬挂收藏（审计 P0）。
+    if not store.get_folder(user.id, req.folder_id):
+        raise HTTPException(status_code=404, detail="文件夹不存在或无权限")
+    try:
+        c = store.add(user.id, cid, req.folder_id)
+    except FolderNotFound:
+        raise HTTPException(status_code=404, detail="文件夹不存在或无权限")
+    return {"ok": True, "id": c.id}
+
+
+@router.delete("/conversations/{cid}/collect/{folder_id}")
+def conv_uncollect(cid: str, folder_id: str, user: User = Depends(require_user)) -> dict[str, Any]:
+    get_expert_folders_store().remove(user.id, cid, folder_id)
+    return {"ok": True}
+
+
+@router.get("/conversations/{cid}/folders")
+def conv_folders(cid: str, user: User = Depends(require_user)) -> dict[str, Any]:
+    return {"folder_ids": get_expert_folders_store().folder_ids_for_conversation(user.id, cid)}
+
+
+@router.post("/folders/membership")
+def folders_membership(req: MembershipReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
+    """批量查询多个专家团会话各自被收藏到哪些文件夹 —— 消除前端 N+1。"""
+    mp = get_expert_folders_store().folder_ids_for_conversations(user.id, req.conversation_ids or [])
+    return {"map": mp}

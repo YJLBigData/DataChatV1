@@ -117,6 +117,45 @@ class MySQLExecutor:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         return ExecResult(columns=columns, rows=rows, row_count=len(rows), elapsed_ms=elapsed_ms, sql=sql)
 
+    def stream_select(self, sql: str, *, max_rows: int | None = None, timeout_ms: int | None = None):
+        """流式取数：服务端游标逐行产出，绝不一次性物化整张结果表（百万行导出用）。
+
+        返回一个生成器：**第一个**产出是表头 list[str]，其后每个产出是一行 list[Any]。
+        生成器在被消费期间保持连接打开（server-side cursor），消费完自动收尾。
+        受 max_rows 上限保护，达到上限即停止迭代。
+        """
+        if not _SELECT_HEAD.match(sql):
+            raise ExecError("Only SELECT statements are allowed.")
+        timeout_ms_v = int(timeout_ms or self.cfg.mysql.statement_timeout_ms)
+        max_rows_v = int(max_rows or self.cfg.guard.max_rows)
+        sql_with_hint = re.sub(
+            r"^\s*select\b",
+            f"SELECT /*+ MAX_EXECUTION_TIME({timeout_ms_v}) */",
+            sql,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+        def _gen():
+            try:
+                with self.engine.connect() as conn:
+                    conn.execute(text("SET SESSION group_concat_max_len = 4096"))
+                    self._maybe_explain_gate(sql, conn)
+                    result = conn.execution_options(stream_results=True, max_row_buffer=2000).execute(
+                        text(sql_with_hint)
+                    )
+                    yield list(result.keys())
+                    sent = 0
+                    for row in result:
+                        if sent >= max_rows_v:
+                            break
+                        yield [_normalize_value(v) for v in row]
+                        sent += 1
+            except DBAPIError as exc:
+                raise ExecError(f"SQL execution failed: {exc.orig if hasattr(exc, 'orig') else exc}") from exc
+
+        return _gen()
+
 
 def _normalize_value(value: Any) -> Any:
     import datetime as _dt

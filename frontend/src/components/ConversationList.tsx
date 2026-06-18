@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api";
+import { toast } from "../shared/toast";
 import { ConfirmDialog, PromptDialog } from "./Modal";
 import type { ConversationMeta, Folder } from "../types";
 
@@ -11,6 +12,34 @@ type Dialog =
   | { kind: "delete-folder"; folder: Folder }
   | { kind: "rename-conv"; conv: ConversationMeta }
   | { kind: "delete-conv"; conv: ConversationMeta };
+
+/**
+ * 文件夹 + 收藏所用的后端接口集合。默认 = 问数；专家团传入各自的 expert* 接口，
+ * 同一个组件即可服务两套**完全独立**的会话历史。
+ */
+export interface FolderScope {
+  listFolders: typeof api.listFolders;
+  createFolder: typeof api.createFolder;
+  renameFolder: typeof api.renameFolder;
+  deleteFolder: typeof api.deleteFolder;
+  folderConversations: typeof api.folderConversations;
+  collectConversation: typeof api.collectConversation;
+  uncollectConversation: typeof api.uncollectConversation;
+  conversationFolderIds: typeof api.conversationFolderIds;
+  conversationFolderIdsBatch: typeof api.conversationFolderIdsBatch;
+}
+
+const CHAT_SCOPE: FolderScope = {
+  listFolders: api.listFolders,
+  createFolder: api.createFolder,
+  renameFolder: api.renameFolder,
+  deleteFolder: api.deleteFolder,
+  folderConversations: api.folderConversations,
+  collectConversation: api.collectConversation,
+  uncollectConversation: api.uncollectConversation,
+  conversationFolderIds: api.conversationFolderIds,
+  conversationFolderIdsBatch: api.conversationFolderIdsBatch,
+};
 
 interface Props {
   items: ConversationMeta[];
@@ -25,6 +54,12 @@ interface Props {
   unreadCids?: Set<string>;
   /** 当前正在 streaming 的对话 — 显示小转圈。 */
   streamingCids?: Set<string>;
+  /** 文件夹/收藏接口集合（默认问数；专家团传 expert* 接口）。 */
+  scope?: FolderScope;
+  /** 列表标题（默认「会话历史」）。 */
+  title?: string;
+  /** 空列表提示文案（默认问数场景；专家团传"开个新分析"类文案）。 */
+  emptyHint?: string;
 }
 
 function fmtTime(ts: number): string {
@@ -39,7 +74,7 @@ function fmtTime(ts: number): string {
  * 会话历史 + 文件夹 — 两种视图：「全部会话」/ 每个文件夹。
  * 鼠标悬停时显示「收藏到 / 移出 / 改名 / 删除」操作。
  */
-export function ConversationList({ items, activeId, onPick, onNew, onRename, onDelete, collapsed, onToggle, unreadCids, streamingCids }: Props) {
+export function ConversationList({ items, activeId, onPick, onNew, onRename, onDelete, collapsed, onToggle, unreadCids, streamingCids, scope = CHAT_SCOPE, title = "会话历史", emptyHint = "暂无历史会话，开个新对话开始问数 →" }: Props) {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [foldersOf, setFoldersOf] = useState<Record<string, string[]>>({}); // conv_id -> folder_ids
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);  // null = 全部
@@ -50,36 +85,46 @@ export function ConversationList({ items, activeId, onPick, onNew, onRename, onD
 
   async function refreshFolders() {
     try {
-      const r = await api.listFolders();
+      const r = await scope.listFolders();
       setFolders(r.items || []);
     } catch { /* ignore */ }
   }
-  useEffect(() => { refreshFolders(); }, []);
+  useEffect(() => { refreshFolders(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [scope]);
 
   // 切到某个文件夹 → 拉它下面的会话
   useEffect(() => {
     if (!activeFolderId) { setFolderConversations([]); return; }
     (async () => {
       try {
-        const r = await api.folderConversations(activeFolderId);
+        const r = await scope.folderConversations(activeFolderId);
         setFolderConversations((r.items as any) || []);
       } catch { setFolderConversations([]); }
     })();
-  }, [activeFolderId]);
+  }, [activeFolderId, scope]);
 
-  // 后台批量查询每个会话被收藏到哪些文件夹（用于显示星标）
+  // 批量查询每个会话被收藏到哪些文件夹（用于显示星标）。
+  // 优先用批量接口（一次请求），不支持时回退逐个查询（兼容旧后端）。
   useEffect(() => {
+    let cancelled = false;
     (async () => {
+      const ids = items.slice(0, 50).map((it) => it.id);
+      if (!ids.length) { if (!cancelled) setFoldersOf({}); return; }
+      try {
+        const r = await scope.conversationFolderIdsBatch(ids);
+        if (!cancelled) setFoldersOf(r.map || {});
+        return;
+      } catch { /* 回退逐个 */ }
       const map: Record<string, string[]> = {};
-      for (const it of items.slice(0, 50)) {
+      for (const id of ids) {
         try {
-          const r = await api.conversationFolderIds(it.id);
-          if (r.folder_ids?.length) map[it.id] = r.folder_ids;
+          const r = await scope.conversationFolderIds(id);
+          if (r.folder_ids?.length) map[id] = r.folder_ids;
         } catch { /* ignore */ }
       }
-      setFoldersOf(map);
+      if (!cancelled) setFoldersOf(map);
     })();
-  }, [items]);
+    return () => { cancelled = true; };
+  }, [items, scope]);
 
   const shown = useMemo<ConversationMeta[]>(() => {
     if (activeFolderId) return folderConversations;
@@ -93,21 +138,21 @@ export function ConversationList({ items, activeId, onPick, onNew, onRename, onD
   }
   async function doCreateFolder(name: string) {
     try {
-      await api.createFolder(name);
+      await scope.createFolder(name);
       setNewFolderName("");
       await refreshFolders();
-    } catch (e: any) { alert("失败：" + (e?.message || e)); }
+    } catch (e: any) { toast.error("新建文件夹失败：" + (e?.message || e)); }
   }
   async function doDeleteFolder(f: Folder) {
     try {
-      await api.deleteFolder(f.id);
+      await scope.deleteFolder(f.id);
       if (activeFolderId === f.id) setActiveFolderId(null);
       await refreshFolders();
-    } catch (e: any) { alert("失败：" + (e?.message || e)); }
+    } catch (e: any) { toast.error("删除文件夹失败：" + (e?.message || e)); }
   }
   async function doRenameFolder(f: Folder, name: string) {
-    try { await api.renameFolder(f.id, name); await refreshFolders(); }
-    catch (e: any) { alert("失败：" + (e?.message || e)); }
+    try { await scope.renameFolder(f.id, name); await refreshFolders(); }
+    catch (e: any) { toast.error("重命名文件夹失败：" + (e?.message || e)); }
   }
 
   if (collapsed) {
@@ -122,7 +167,7 @@ export function ConversationList({ items, activeId, onPick, onNew, onRename, onD
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r bg-white" style={{ borderColor: "#eef1f8" }}>
       <div className="flex items-center justify-between gap-2 border-b px-4 py-3" style={{ borderColor: "#eef1f8" }}>
-        <div className="text-sm font-semibold text-slate-700">会话历史</div>
+        <div className="text-sm font-semibold text-slate-700">{title}</div>
         <div className="flex items-center gap-1">
           <button className="qq-btn-ghost px-2 py-1" title="新建会话" onClick={onNew}><span className="text-base text-blue-500">+ 新建</span></button>
           <button className="qq-btn-ghost px-1.5 py-1" title="收起" onClick={onToggle}><span className="text-base">«</span></button>
@@ -154,7 +199,7 @@ export function ConversationList({ items, activeId, onPick, onNew, onRename, onD
       <div className="flex-1 overflow-y-auto px-2 py-2">
         {shown.length === 0 ? (
           <div className="px-3 py-6 text-xs text-slate-400">
-            {activeFolderId ? "该文件夹暂无收藏" : "暂无历史会话，开个新对话开始问数 →"}
+            {activeFolderId ? "该文件夹暂无收藏" : emptyHint}
           </div>
         ) : (
           shown.map((it) => {
@@ -212,12 +257,13 @@ export function ConversationList({ items, activeId, onPick, onNew, onRename, onD
         <CollectModal
           conversation={collectFor}
           folders={folders}
+          scope={scope}
           onClose={() => setCollectFor(null)}
           onChanged={async () => {
-            const r = await api.conversationFolderIds(collectFor.id);
+            const r = await scope.conversationFolderIds(collectFor.id);
             setFoldersOf(prev => ({ ...prev, [collectFor.id]: r.folder_ids || [] }));
             if (activeFolderId) {
-              const f = await api.folderConversations(activeFolderId);
+              const f = await scope.folderConversations(activeFolderId);
               setFolderConversations((f.items as any) || []);
             }
           }}
@@ -282,8 +328,9 @@ function FolderChip({ label, active, onClick, onRename, onDelete }: {
   );
 }
 
-function CollectModal({ conversation, folders, onClose, onChanged }: {
-  conversation: ConversationMeta; folders: Folder[]; onClose: () => void; onChanged: () => Promise<void> | void
+function CollectModal({ conversation, folders, scope, onClose, onChanged }: {
+  conversation: ConversationMeta; folders: Folder[]; scope: FolderScope;
+  onClose: () => void; onChanged: () => Promise<void> | void
 }) {
   const [included, setIncluded] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -291,24 +338,24 @@ function CollectModal({ conversation, folders, onClose, onChanged }: {
   useEffect(() => {
     (async () => {
       try {
-        const r = await api.conversationFolderIds(conversation.id);
+        const r = await scope.conversationFolderIds(conversation.id);
         setIncluded(r.folder_ids || []);
       } catch { setIncluded([]); }
     })();
-  }, [conversation.id]);
+  }, [conversation.id, scope]);
 
   async function toggle(fid: string) {
     setBusy(true);
     try {
       if (included.includes(fid)) {
-        await api.uncollectConversation(conversation.id, fid);
+        await scope.uncollectConversation(conversation.id, fid);
         setIncluded(prev => prev.filter(x => x !== fid));
       } else {
-        await api.collectConversation(conversation.id, fid);
+        await scope.collectConversation(conversation.id, fid);
         setIncluded(prev => [...prev, fid]);
       }
       await onChanged();
-    } catch (e: any) { alert("失败：" + (e?.message || e)); }
+    } catch (e: any) { toast.error("收藏操作失败：" + (e?.message || e)); }
     finally { setBusy(false); }
   }
 

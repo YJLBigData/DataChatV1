@@ -93,6 +93,17 @@ class ExpertTeamStore:
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (user_id, expert_id)
                 );
+                CREATE TABLE IF NOT EXISTS expert_job_v1 (
+                    job_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    finished_at REAL NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_expert_job_user ON expert_job_v1(user_id, created_at DESC);
                 """
             )
 
@@ -238,6 +249,90 @@ class ExpertTeamStore:
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("expert_team run log failed: %s", exc)
+
+    # ------------------------------------------------------ job records (审计/恢复)
+
+    def upsert_job(self, *, job_id: str, user_id: str, conversation_id: str, question: str,
+                   status: str, error: str = "", created_at: float, finished_at: float = 0.0) -> None:
+        """落库后台 job 记录与最终状态（审计 + 重启后可见历史）。best-effort。"""
+        try:
+            with self._lock, self._conn() as c:
+                c.execute(
+                    "INSERT OR REPLACE INTO expert_job_v1"
+                    "(job_id,user_id,conversation_id,question,status,error,created_at,finished_at)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (job_id, user_id, conversation_id, (question or "")[:2000], status,
+                     (error or "")[:500], created_at, finished_at),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("expert_team job record failed: %s", exc)
+
+    def update_job_status(self, job_id: str, status: str, error: str = "", finished_at: float = 0.0) -> None:
+        try:
+            with self._lock, self._conn() as c:
+                c.execute(
+                    "UPDATE expert_job_v1 SET status=?, error=?, finished_at=? WHERE job_id=?",
+                    (status, (error or "")[:500], finished_at, job_id),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("expert_team job status update failed: %s", exc)
+
+    def count_active_jobs(self, user_id: str) -> int:
+        """该用户尚未结束的 job 数（用于每用户背压；多 worker 共享同一 SQLite）。"""
+        try:
+            with self._lock, self._conn() as c:
+                r = c.execute(
+                    "SELECT COUNT(*) AS n FROM expert_job_v1 WHERE user_id=? AND status IN ('queued','running')",
+                    (user_id,),
+                ).fetchone()
+            return int(r["n"] if r else 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def count_active_global(self) -> int:
+        """全局尚未结束的 job 数（全局队列深度上限；多 worker 共享同一 SQLite）。"""
+        try:
+            with self._lock, self._conn() as c:
+                r = c.execute(
+                    "SELECT COUNT(*) AS n FROM expert_job_v1 WHERE status IN ('queued','running')"
+                ).fetchone()
+            return int(r["n"] if r else 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        """读单条 job 记录（跨 worker 轮询/列举用：内存里没有时回退 DB）。"""
+        try:
+            with self._lock, self._conn() as c:
+                r = c.execute("SELECT * FROM expert_job_v1 WHERE job_id=?", (job_id,)).fetchone()
+            return dict(r) if r else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def list_active_jobs(self, user_id: str) -> list[dict[str, Any]]:
+        """该用户在途（queued|running）job 记录（跨 worker 重挂红点/进度用）。"""
+        try:
+            with self._lock, self._conn() as c:
+                rows = c.execute(
+                    "SELECT * FROM expert_job_v1 WHERE user_id=? AND status IN ('queued','running') "
+                    "ORDER BY created_at DESC",
+                    (user_id,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def reset_stale_active_jobs(self) -> None:
+        """进程启动时把 DB 里仍标记 queued/running 的旧 job 收敛为 interrupted（上次进程已退出）。"""
+        try:
+            with self._lock, self._conn() as c:
+                c.execute(
+                    "UPDATE expert_job_v1 SET status='interrupted', finished_at=? "
+                    "WHERE status IN ('queued','running')",
+                    (time.time(),),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("expert_team stale job reset failed: %s", exc)
 
 
 _store_singleton: Optional[ExpertTeamStore] = None

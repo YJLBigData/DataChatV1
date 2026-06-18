@@ -117,6 +117,10 @@ class CollectionReq(BaseModel):
     folder_id: str
 
 
+class FolderMembershipReq(BaseModel):
+    conversation_ids: list[str] = []
+
+
 class CreateUserReq(BaseModel):
     username: str
     password: Optional[str] = None       # 留空则后端随机生成一次性强密码

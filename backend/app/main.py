@@ -69,11 +69,12 @@ except Exception:  # pragma: no cover
 
 from app.core.auth import get_auth_store, AuthError, User
 from app.core.config import load_config
+from app.api.support import trusted_result_for_trace as _trusted_result_for_trace, user_dict as _user_dict
 from app.core.conversation import get_conversation_store
 from app.core.feishu import push as feishu_push, FeishuError
 from app.core.nl2sql.plan import QueryPlan
 from app.core.orchestrator import Pipeline, get_pipeline, to_sse_done, to_sse_error, to_sse_event, TraceEvent
-from app.core.folders import get_folders_store
+from app.core.folders import get_folders_store, FolderNotFound
 from app.core.permissions import get_permissions_store
 from app.core.query_log import get_query_log_store
 from app.core.report import generate_report
@@ -124,7 +125,7 @@ from app.api.schemas import (  # noqa: E402
     LoginReq, ChatRequest, ConversationCreateReq, ConversationRenameReq,
     FeishuPushReq, ReportRequest, ReportTemplateReq, ReportTemplatePatchReq,
     LLMSettingsPutReq, LLMPresetCreateReq, LLMPresetPatchReq, LLMPresetTestReq,
-    FolderCreateReq, FolderRenameReq, CollectionReq, CreateUserReq,
+    FolderCreateReq, FolderRenameReq, CollectionReq, FolderMembershipReq, CreateUserReq,
     ResetPasswordReq, UserActiveReq, MyPasswordReq, MyProfileReq,
     SemanticPutReq, SemanticEntityReq, SemanticAnalyzeReq, SemanticStatusReq,
     ChatFeedbackReq, PermissionsPutReq,
@@ -137,6 +138,10 @@ from app.api.deps import (  # noqa: E402
     _bearer_token, _PW_CHANGE_EXEMPT_PATHS, _authenticate_or_403,
     require_user, require_admin,
 )
+
+
+# 关键特性路由挂载错误（mount_at -> 错误摘要）。本地继续启动但记录于此，管理员诊断可见。
+_ROUTER_MOUNT_ERRORS: dict[str, str] = {}
 
 
 # ----------------------------------------------------------------- app factory
@@ -200,14 +205,41 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # 专家团（独立模块）：决策调度总监 + 多专家协同问数/报告。整段自包含在
-    # app.expert_team 下，这里仅一行挂载，不与问数主链路耦合（导入失败不影响主应用）。
-    try:
-        from app.expert_team.api import router as _expert_team_router
-        app.include_router(_expert_team_router)
-        logger.info("expert_team router mounted at /api/expert-team")
-    except Exception as _exc:  # noqa: BLE001
-        logger.warning("expert_team router not mounted: %s", _exc)
+    # 关键特性路由（专家团 / SmartQ / 导出队列）：各自自包含模块，这里一行挂载。
+    # 审计 P1：生产环境若导入失败必须**快速失败**（启动即报错），绝不让"健康但缺特性"
+    # 的半残应用悄悄上线；本地/开发则记录诊断、继续启动便于排查。
+    def _mount(import_path: str, attr: str, mount_at: str) -> None:
+        try:
+            import importlib
+            mod = importlib.import_module(import_path)
+            app.include_router(getattr(mod, attr))
+            logger.info("router mounted at %s", mount_at)
+        except Exception as exc:  # noqa: BLE001
+            _ROUTER_MOUNT_ERRORS[mount_at] = f"{type(exc).__name__}: {exc}"
+            if not _is_local:
+                logger.error("FATAL: critical router %s failed to mount: %s", mount_at, exc)
+                raise RuntimeError(f"critical router {mount_at} failed to mount: {exc}") from exc
+            logger.warning("router not mounted (local, continuing): %s -> %s", mount_at, exc)
+
+    _ROUTER_MOUNT_ERRORS.clear()
+    _mount("app.expert_team.api", "router", "/api/expert-team")
+    _mount("app.integrations.smartq.api", "router", "/api/smartq")
+    _mount("app.exports.api", "router", "/api/exports")
+
+    # 核心路由（按域拆分到 app/api/routes/*，与上面可选特性路由同构挂载）。
+    # 这些是主链路必备路由，导入失败应直接让应用启动失败（不吞异常）。
+    from app.api.routes.admin import router as _admin_router
+    from app.api.routes.conversations import router as _conversations_router
+    from app.api.routes.feishu import router as _feishu_router
+    from app.api.routes.folders import router as _folders_router
+    from app.api.routes.llm import router as _llm_router
+    from app.api.routes.reports import router as _reports_router
+    app.include_router(_conversations_router)
+    app.include_router(_folders_router)
+    app.include_router(_reports_router)
+    app.include_router(_feishu_router)
+    app.include_router(_admin_router)
+    app.include_router(_llm_router)
 
     # 阶段 1.4 限流：per-token（含未登录退化到 IP）。模块缺失时静默降级（仅警告）。
     if _SLOWAPI_OK and _SlowLimiter is not None:
@@ -322,6 +354,11 @@ def create_app() -> FastAPI:
             "cache": cache_status(),
             "feishu": {"configured": feishu_ok},
             "llm": {"provider": cfg.llm.primary_provider, "model": cfg.llm.bailian_chat_model},
+            "routers": {
+                "mounted": [p for p in ("/api/expert-team", "/api/smartq", "/api/exports")
+                            if p not in _ROUTER_MOUNT_ERRORS],
+                "errors": dict(_ROUTER_MOUNT_ERRORS),
+            },
         }
 
     @app.get("/api/bootstrap")
@@ -380,90 +417,6 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=400, detail=str(exc))
         new_user = get_auth_store().get_by_id(user.id)
         return _user_dict(new_user) if new_user else {}
-
-    # ============================================================ admin: users
-
-    @app.get("/api/admin/users")
-    def api_admin_list_users(_: User = Depends(require_admin)) -> dict[str, Any]:
-        users = get_auth_store().list_users()
-        return {"items": [_user_dict(u) for u in users]}
-
-    @app.post("/api/admin/users")
-    def api_admin_create_user(req: CreateUserReq = Body(...), _: User = Depends(require_admin)) -> dict[str, Any]:
-        from app.core.auth import generate_initial_password
-        # 没传密码 → 随机生成强密码并返回（一次性，admin 转告新用户）
-        initial_pwd = req.password or generate_initial_password()
-        enforce = bool(req.password)   # 用户传密码必须强度校验；系统生成跳过（自带强度）
-        try:
-            user = get_auth_store().create_user(
-                req.username, initial_pwd, req.role,
-                email=req.email or "",
-                must_change_password=bool(req.must_change_password),
-                enforce_strength=enforce,
-            )
-        except AuthError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        out = _user_dict(user)
-        if not req.password:
-            out["one_time_password"] = initial_pwd
-        return out
-
-    @app.delete("/api/admin/users/{username}")
-    def api_admin_delete_user(username: str, _: User = Depends(require_admin)) -> dict[str, Any]:
-        try:
-            get_auth_store().delete_user(username)
-        except AuthError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        return {"ok": True}
-
-    @app.post("/api/admin/users/{username}/password")
-    def api_admin_reset_password(username: str, req: ResetPasswordReq = Body(...), _: User = Depends(require_admin)) -> dict[str, Any]:
-        from app.core.auth import generate_initial_password
-        new_pwd = req.new_password or generate_initial_password()
-        enforce = bool(req.new_password)
-        try:
-            get_auth_store().set_password(
-                username, new_pwd,
-                enforce_strength=enforce,
-                clear_must_change=not req.must_change_password,
-            )
-        except AuthError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        out: dict[str, Any] = {"ok": True}
-        if not req.new_password:
-            out["one_time_password"] = new_pwd
-        return out
-
-    @app.post("/api/admin/users/{username}/active")
-    def api_admin_set_user_active(username: str, req: UserActiveReq = Body(...), admin: User = Depends(require_admin)) -> dict[str, Any]:
-        """启用/停用账号。停用后该用户无法登录、已签发 token 立即失效。"""
-        if username.strip().lower() == admin.username and not req.is_active:
-            raise HTTPException(status_code=400, detail="不能停用当前登录的管理员账号")
-        store = get_auth_store()
-        if not hasattr(store, "set_active"):
-            raise HTTPException(status_code=501, detail="当前用户存储不支持启停")
-        try:
-            store.set_active(username, bool(req.is_active))
-        except AuthError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        return {"ok": True, "username": username, "is_active": bool(req.is_active)}
-
-    # ============================================================ admin: query log
-
-    @app.get("/api/admin/logs")
-    def api_admin_logs(
-        _: User = Depends(require_admin),
-        limit: int = Query(50, ge=1, le=500),
-        offset: int = Query(0, ge=0),
-        username: Optional[str] = None,
-        status: Optional[str] = None,
-        keyword: Optional[str] = None,
-    ) -> dict[str, Any]:
-        items, total = get_query_log_store().list(
-            limit=limit, offset=offset,
-            username_like=username, status=status, keyword=keyword,
-        )
-        return {"items": items, "total": total, "limit": limit, "offset": offset}
 
     # ============================================================ admin: semantic
 
@@ -623,201 +576,6 @@ def create_app() -> FastAPI:
         result["rolled_back_to"] = vid
         return result
 
-    # ============================================================ admin: permissions
-
-    @app.get("/api/admin/permissions")
-    def api_admin_list_perms(_: User = Depends(require_admin)) -> dict[str, Any]:
-        store = get_permissions_store()
-        users = get_auth_store().list_users()
-        all_perms = store.list_all()
-        return {
-            "items": [
-                {
-                    "user_id": u.id, "username": u.username, "role": u.role,
-                    "row_rules":       all_perms.get(u.id, {}).get("row_rules") or {},
-                    "allowed_tables":  all_perms.get(u.id, {}).get("allowed_tables") or [],
-                    "allowed_columns": all_perms.get(u.id, {}).get("allowed_columns") or {},
-                    "deny_by_default": bool(all_perms.get(u.id, {}).get("deny_by_default")),
-                }
-                for u in users
-            ]
-        }
-
-    @app.get("/api/admin/permissions/{user_id}")
-    def api_admin_get_perms(user_id: str, _: User = Depends(require_admin)) -> dict[str, Any]:
-        b = get_permissions_store().get_for_user(user_id)
-        return {
-            "user_id": user_id,
-            "row_rules": b.row_rules,
-            "allowed_tables": b.allowed_tables,
-            "allowed_columns": b.allowed_columns,
-            "deny_by_default": b.deny_by_default,
-        }
-
-    @app.put("/api/admin/permissions/{user_id}")
-    def api_admin_put_perms(user_id: str, req: PermissionsPutReq = Body(...), _: User = Depends(require_admin)) -> dict[str, Any]:
-        pipe = get_pipe()
-        valid_dims = set(pipe.semantic.dimensions.keys())
-        valid_tables = set(pipe.semantic.tables.keys())
-        if req.row_rules:
-            unknown = [d for d in req.row_rules.keys() if d not in valid_dims]
-            if unknown:
-                raise HTTPException(status_code=400, detail=f"未知维度: {unknown}")
-        if req.allowed_tables:
-            unknown = [t for t in req.allowed_tables if t not in valid_tables]
-            if unknown:
-                raise HTTPException(status_code=400, detail=f"未知数据表: {unknown}")
-        if req.allowed_columns:
-            for tbl in req.allowed_columns.keys():
-                if tbl not in valid_tables:
-                    raise HTTPException(status_code=400, detail=f"未知数据表: {tbl}")
-        get_permissions_store().set_for_user(
-            user_id,
-            row_rules=req.row_rules,
-            allowed_tables=req.allowed_tables,
-            allowed_columns=req.allowed_columns,
-            deny_by_default=req.deny_by_default,
-        )
-        return {"ok": True}
-
-    # ============================================================ llm providers
-    @app.get("/api/llm/providers")
-    def api_llm_providers(_user: User = Depends(require_user)) -> dict[str, Any]:
-        """右上角下拉框用：列出本环境**已配置**的 LLM provider + 默认值。
-        不返回任何 key/secret 明文。"""
-        from app.core.llm.router import available_providers, default_provider
-        return {
-            "available": available_providers(),
-            "default": default_provider(),
-        }
-
-    # ============================================================ admin: llm settings
-    @app.get("/api/admin/llm-settings")
-    def api_admin_get_llm_settings(_: User = Depends(require_admin)) -> dict[str, Any]:
-        """读当前生效的 LLM 配置（DB 优先 → env → cfg 默认）。
-        secret(DASHSCOPE_API_KEY) 一律脱敏成 'sk-***1234'，**绝不**回完整密文。"""
-        from app.core.llm_settings import get_llm_settings_store
-        return {"settings": get_llm_settings_store().get_all_effective()}
-
-    @app.put("/api/admin/llm-settings")
-    def api_admin_put_llm_settings(
-        req: LLMSettingsPutReq = Body(...),
-        _: User = Depends(require_admin),
-    ) -> dict[str, Any]:
-        """写 LLM 配置到 SQLite，**写完即生效**（下一次 LLM 调用自动用新值，无需重启）。
-        空字符串/None 视为"清除该键"，下次回退到 env 或代码默认。
-        允许键白名单：DASHSCOPE_API_KEY / DASHSCOPE_BASE_URL / DASHSCOPE_MODEL /
-                   DASHSCOPE_EMBED_MODEL / LLM_PROVIDER。"""
-        from app.core.llm_settings import get_llm_settings_store
-        store = get_llm_settings_store()
-        # req.dict(exclude_unset=False) 取所有字段；空串=清除，None=不动
-        payload = req.dict()
-        # None 字段视作"未传/不动"，过滤掉
-        updates = {k: v for k, v in payload.items() if v is not None}
-        changed = store.set_many(updates)
-        logger.info("admin llm-settings update keys=%s", changed)
-        return {"ok": True, "updated": changed, "version": store.version}
-
-    # ============================================================ admin: llm presets (multi-LLM)
-    @app.get("/api/admin/llm-presets")
-    def api_admin_list_llm_presets(_: User = Depends(require_admin)) -> dict[str, Any]:
-        from app.core.llm_presets import get_llm_presets_store
-        return {"items": [p.to_dict_masked() for p in get_llm_presets_store().list_all(include_inactive=True)]}
-
-    @app.post("/api/admin/llm-presets/test")
-    def api_admin_test_llm_preset_candidate(
-        req: LLMPresetTestReq = Body(...),
-        _: User = Depends(require_admin),
-    ) -> dict[str, Any]:
-        """保存前测试：用候选配置直接发一句问题，必须收到非空回复才返回 ok=True；不写库。"""
-        from app.core.llm.test_runner import test_preset_config, DEFAULT_TEST_PROMPT
-        from app.core.llm_presets import get_llm_presets_store
-        api_key = req.api_key or ""
-        # 编辑场景（P1）：未输入新 AK（api_key 为空）但带了 preset_id → 用旧 AK + 草稿字段合并测试，
-        # 确保测的就是"即将保存的 base_url/model"，而不是旧的整套配置。
-        if req.provider == "bailian" and not api_key.strip() and req.preset_id:
-            existing = get_llm_presets_store().get(req.preset_id)
-            if existing and existing.provider == "bailian":
-                api_key = existing.api_key or ""
-        result = test_preset_config(
-            req.provider,
-            api_key=api_key, base_url=req.base_url,
-            model=req.model,
-        )
-        result["prompt"] = req.prompt or DEFAULT_TEST_PROMPT
-        return result
-
-    @app.post("/api/admin/llm-presets")
-    def api_admin_create_llm_preset(
-        req: LLMPresetCreateReq = Body(...),
-        _: User = Depends(require_admin),
-    ) -> dict[str, Any]:
-        from app.core.llm_presets import get_llm_presets_store
-        try:
-            p = get_llm_presets_store().create(
-                name=req.name, provider=req.provider, api_key=req.api_key,
-                base_url=req.base_url, model=req.model, embed_model=req.embed_model,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        return {"ok": True, "preset": p.to_dict_masked()}
-
-    @app.put("/api/admin/llm-presets/{preset_id}")
-    def api_admin_update_llm_preset(
-        preset_id: str,
-        req: LLMPresetPatchReq = Body(...),
-        _: User = Depends(require_admin),
-    ) -> dict[str, Any]:
-        from app.core.llm_presets import get_llm_presets_store
-        try:
-            p = get_llm_presets_store().update(
-                preset_id,
-                name=req.name, provider=req.provider, api_key=req.api_key,
-                base_url=req.base_url, model=req.model, embed_model=req.embed_model,
-                is_active=req.is_active,
-            )
-        except ValueError as exc:
-            code = 404 if "不存在" in str(exc) else 400
-            raise HTTPException(status_code=code, detail=str(exc))
-        return {"ok": True, "preset": p.to_dict_masked()}
-
-    @app.delete("/api/admin/llm-presets/{preset_id}")
-    def api_admin_delete_llm_preset(
-        preset_id: str,
-        _: User = Depends(require_admin),
-    ) -> dict[str, Any]:
-        from app.core.llm_presets import get_llm_presets_store
-        get_llm_presets_store().delete(preset_id)
-        return {"ok": True}
-
-    @app.post("/api/admin/llm-presets/{preset_id}/set-default")
-    def api_admin_set_default_llm_preset(
-        preset_id: str,
-        _: User = Depends(require_admin),
-    ) -> dict[str, Any]:
-        from app.core.llm_presets import get_llm_presets_store
-        try:
-            get_llm_presets_store().set_default(preset_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
-        return {"ok": True}
-
-    @app.post("/api/admin/llm-presets/{preset_id}/test")
-    def api_admin_test_existing_llm_preset(
-        preset_id: str,
-        _: User = Depends(require_admin),
-    ) -> dict[str, Any]:
-        """对已存的 preset 跑一发测试，把结果写回 last_test_*"""
-        from app.core.llm_presets import get_llm_presets_store
-        from app.core.llm.test_runner import test_preset_config
-        store = get_llm_presets_store()
-        p = store.get(preset_id)
-        if not p:
-            raise HTTPException(status_code=404, detail="preset 不存在")
-        result = test_preset_config(p.provider, api_key=p.api_key, base_url=p.base_url, model=p.model)
-        store.record_test(preset_id, bool(result.get("ok")), str(result.get("text") or result.get("error") or ""))
-        return result
-
     # ============================================================ chat
 
     # 阶段 1.4：单接口限流。没装 slowapi 时为 no-op，不影响功能。
@@ -897,50 +655,7 @@ def create_app() -> FastAPI:
 
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    # ====================================================== conversations
-
-    @app.post("/api/conversations")
-    def conversations_create(req: ConversationCreateReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
-        s = get_conversation_store().create_session(user.id, title=req.title)
-        return {"id": s.id, "title": s.title, "created_at": s.created_at, "updated_at": s.updated_at}
-
-    @app.get("/api/conversations")
-    def conversations_list(user: User = Depends(require_user)) -> dict[str, Any]:
-        items = get_conversation_store().list_sessions(user.id)
-        return {"items": [{"id": s.id, "title": s.title, "created_at": s.created_at, "updated_at": s.updated_at} for s in items]}
-
-    @app.get("/api/conversations/{cid}")
-    def conversations_get(cid: str, user: User = Depends(require_user)) -> dict[str, Any]:
-        store = get_conversation_store()
-        s = store.get_session(cid)
-        if not s or s.user_id != user.id:
-            raise HTTPException(status_code=404, detail="conversation not found")
-        msgs = store.list_messages(cid)
-        return {
-            "id": s.id, "title": s.title, "created_at": s.created_at, "updated_at": s.updated_at,
-            "messages": [
-                {"id": m.id, "role": m.role, "content": m.content, "payload": m.payload, "created_at": m.created_at}
-                for m in msgs
-            ],
-        }
-
-    @app.patch("/api/conversations/{cid}")
-    def conversations_rename(cid: str, body: ConversationRenameReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
-        store = get_conversation_store()
-        s = store.get_session(cid)
-        if not s or s.user_id != user.id:
-            raise HTTPException(status_code=404, detail="conversation not found")
-        store.rename_session(cid, body.title or "新会话")
-        return {"ok": True}
-
-    @app.delete("/api/conversations/{cid}")
-    def conversations_delete(cid: str, user: User = Depends(require_user)) -> dict[str, Any]:
-        store = get_conversation_store()
-        s = store.get_session(cid)
-        if not s or s.user_id != user.id:
-            raise HTTPException(status_code=404, detail="conversation not found")
-        store.delete_session(cid)
-        return {"ok": True}
+    # 会话历史路由已拆到 app/api/routes/conversations.py（见上方 include_router）。
 
     # ============================================================ feishu
 
@@ -982,207 +697,8 @@ def create_app() -> FastAPI:
         from app.core.fewshot_store import get_fewshot_store
         return get_fewshot_store().stats()
 
-    @app.post("/api/feishu/push")
-    def api_feishu_push(req: FeishuPushReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
-        import uuid as _uuid
-        import hashlib as _hashlib
-        trace_id = _uuid.uuid4().hex
-        # 安全（P0）：推送的经营结论必须由后端按 trace 从会话存储取可信结果生成，
-        # 不信任前端传入的 narrative/highlights/rows_preview，杜绝伪造结论推送。
-        trusted = _trusted_result_for_trace(get_conversation_store(), user, req.conversation_id, req.trace_id)
-        answer = trusted["answer"]
-        narrative = str(answer.get("narrative") or "")
-        highlights = [str(h) for h in (answer.get("highlights") or []) if str(h).strip()][:10]
-        table = answer.get("table") if isinstance(answer.get("table"), dict) else {}
-        display_rows = table.get("display_rows") or table.get("rows") or []
-        rows_preview = [
-            " | ".join(str(c) for c in row)
-            for row in display_rows[:5] if isinstance(row, (list, tuple))
-        ]
-        title = (trusted["question"] or "").strip()[:30] or "飞鹤小Q · 经营分析"
 
-        # 安全（P0）：记录后端实际推送内容的指纹（sha256），便于审计追溯 / 防篡改取证。
-        content_sha256 = _hashlib.sha256(
-            "\n".join([narrative, *highlights, *rows_preview]).encode("utf-8")
-        ).hexdigest()
-
-        # 安全（P1）：禁止请求体指定任意 webhook/url（SSRF / 内网探测）。
-        # 推送目标只允许：服务端配置的 webhook，或按"用户邮箱→open_id"个人推送。
-        #
-        # 收件人解析规则：
-        #   · 管理员：必须显式传 user_email（admin@feihe.com 这种系统账号在飞书查不到
-        #     open_id，绝不应该 fallback 到 user.email 去试，会必失败）；
-        #     若没传，target_email=None → 落到 env 里 FEISHU_WEBHOOK 兜底（管理群）。
-        #   · 普通用户：用自己绑定的飞书邮箱 user.email。请求体里 user_email 一概忽略，
-        #     防止越权推给别人。
-        if user.role == "admin":
-            target_email = (req.user_email or "").strip() or None
-        else:
-            target_email = (user.email or "").strip() or None
-        logger.info("[trace=%s chat_trace=%s user=%s] feishu push content_sha256=%s to=%s",
-                    trace_id, req.trace_id, user.username, content_sha256, target_email or "(webhook)")
-        try:
-            res = feishu_push(
-                title, narrative, highlights, rows_preview,
-                user_email=target_email, webhook=None, url=None,
-            )
-            return {"ok": True, "trace_id": trace_id, "content_sha256": content_sha256}
-        except FeishuError as exc:
-            # 真实异常（含底层网络错误）只进日志，绝不回传用户侧
-            logger.warning("[trace=%s user=%s] feishu push failed: %s", trace_id, user.username, exc)
-            return {"ok": False, "error_code": "FEISHU_PUSH_FAILED",
-                    "user_message": "飞书推送失败，请确认已配置推送或联系管理员。",
-                    "trace_id": trace_id}
-        except Exception as exc:
-            logger.exception("[trace=%s user=%s] feishu push crashed: %s", trace_id, user.username, exc)
-            return {"ok": False, "error_code": "FEISHU_PUSH_ERROR",
-                    "user_message": "飞书推送失败，请稍后重试或联系管理员。",
-                    "trace_id": trace_id}
-
-    # ============================================================ report
-
-    @app.post("/api/report/generate")
-    def api_report(req: ReportRequest = Body(...), user: User = Depends(require_user)):
-        backend_root = Path(__file__).resolve().parent.parent
-        out_dir = backend_root / "reports" / "generated"
-        # 安全（P0）：报告内容从会话存储按 trace 取可信结果，不信任前端 payload。
-        trusted = _trusted_result_for_trace(get_conversation_store(), user, req.conversation_id, req.trace_id)
-        store = get_report_template_store()
-        # 模板归属校验：admin 通用；普通用户只能用系统模板或自己的
-        tpl = store.get(req.template_id) if req.template_id else None
-        if tpl and user.role != "admin" and tpl.user_id and tpl.user_id != user.id:
-            raise HTTPException(status_code=403, detail="无权使用该模板")
-        if not tpl:
-            tpl = store.get_default_for_user(user.id)
-        prompt = tpl.prompt if tpl else None
-        name = tpl.name if tpl else "标准商业分析报告"
-        try:
-            path = generate_report(
-                trusted["question"], trusted["answer"], trusted["plan"], trusted["sql"],
-                output_dir=out_dir, template_prompt=prompt, template_name=name,
-            )
-        except Exception as exc:
-            logger.exception("[user=%s] report failed: %s", user.username, exc)
-            raise HTTPException(status_code=500, detail="报告生成失败，请稍后重试，或联系管理员。")
-        return FileResponse(path, filename=path.name,
-                            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-
-    # ====================================== 报告模板（user 隔离）
-    # 普通用户：看「系统默认」+「自己创建的」；只能改自己的
-    # admin：看全部，按用户筛选；可以改任何
-
-    @app.get("/api/report/templates")
-    def api_list_report_templates(user: User = Depends(require_user), owner: Optional[str] = Query(None)) -> dict[str, Any]:
-        store = get_report_template_store()
-        if user.role == "admin":
-            if owner:
-                items = [t for t in store.list_all() if t.user_id == owner or (owner == "system" and not t.user_id)]
-            else:
-                items = store.list_all()
-        else:
-            items = store.list_for_user(user.id)
-        return {"items": [{"id": t.id, "name": t.name, "prompt": t.prompt,
-                           "is_default": t.is_default, "user_id": t.user_id,
-                           "is_system": not t.user_id,
-                           "is_mine": t.user_id == user.id,
-                           "created_at": t.created_at, "updated_at": t.updated_at} for t in items]}
-
-    @app.post("/api/report/templates")
-    def api_create_template(req: ReportTemplateReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
-        """普通用户创建私有模板（user_id=自己）；admin 可选 user_id="" 创建系统模板。"""
-        target_user_id = user.id if user.role != "admin" else (user.id if not getattr(req, "system", False) else "")
-        try:
-            t = get_report_template_store().create(name=req.name, prompt=req.prompt,
-                                                   is_default=req.is_default, user_id=target_user_id)
-        except ValueError as exc:
-            # 业务校验信息（如名称为空）对管理员可见即可，不含内部细节
-            raise HTTPException(status_code=400, detail=str(exc))
-        except Exception as exc:
-            logger.exception("[user=%s] create report template failed: %s", user.username, exc)
-            raise HTTPException(status_code=500, detail="模板保存失败，请稍后重试或联系管理员。")
-        return {"id": t.id, "name": t.name, "is_default": t.is_default, "user_id": t.user_id}
-
-    @app.patch("/api/report/templates/{tid}")
-    def api_update_template(tid: str, req: ReportTemplatePatchReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
-        try:
-            get_report_template_store().update(
-                tid, name=req.name, prompt=req.prompt, is_default=req.is_default,
-                requester_user_id=user.id, requester_is_admin=(user.role == "admin"),
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=403 if "无权" in str(exc) else 400, detail=str(exc))
-        return {"ok": True}
-
-    @app.delete("/api/report/templates/{tid}")
-    def api_delete_template(tid: str, user: User = Depends(require_user)) -> dict[str, Any]:
-        try:
-            get_report_template_store().delete(
-                tid,
-                requester_user_id=user.id, requester_is_admin=(user.role == "admin"),
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=403 if "无权" in str(exc) else 400, detail=str(exc))
-        return {"ok": True}
-
-    # ============================================================ folders + favorites
-
-    @app.get("/api/folders")
-    def api_folders_list(user: User = Depends(require_user)) -> dict[str, Any]:
-        items = get_folders_store().list_folders(user.id)
-        return {"items": [{"id": f.id, "name": f.name, "color": f.color, "created_at": f.created_at} for f in items]}
-
-    @app.post("/api/folders")
-    def api_folders_create(req: FolderCreateReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
-        f = get_folders_store().create_folder(user.id, req.name, req.color)
-        return {"id": f.id, "name": f.name, "color": f.color, "created_at": f.created_at}
-
-    @app.patch("/api/folders/{folder_id}")
-    def api_folders_rename(folder_id: str, req: FolderRenameReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
-        get_folders_store().rename_folder(user.id, folder_id, req.name, req.color)
-        return {"ok": True}
-
-    @app.delete("/api/folders/{folder_id}")
-    def api_folders_delete(folder_id: str, user: User = Depends(require_user)) -> dict[str, Any]:
-        get_folders_store().delete_folder(user.id, folder_id)
-        return {"ok": True}
-
-    @app.get("/api/folders/{folder_id}/conversations")
-    def api_folders_conversations(folder_id: str, user: User = Depends(require_user)) -> dict[str, Any]:
-        store = get_folders_store()
-        items = store.list_collections(user.id, folder_id=folder_id)
-        # 加上会话元信息
-        conv_store = get_conversation_store()
-        out: list[dict[str, Any]] = []
-        for it in items:
-            s = conv_store.get_session(it.conversation_id)
-            if not s:
-                continue
-            out.append({
-                "id": s.id, "title": s.title, "created_at": s.created_at, "updated_at": s.updated_at,
-                "collected_at": it.created_at,
-            })
-        return {"items": out}
-
-    @app.post("/api/conversations/{cid}/collect")
-    def api_conversation_collect(cid: str, req: CollectionReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
-        # cid 必须等于 body.conversation_id，且会话必须属于该用户
-        if cid != req.conversation_id:
-            raise HTTPException(status_code=400, detail="conversation_id 不一致")
-        s = get_conversation_store().get_session(cid)
-        if not s or s.user_id != user.id:
-            raise HTTPException(status_code=404, detail="会话不存在或无权限")
-        c = get_folders_store().add(user.id, cid, req.folder_id)
-        return {"ok": True, "id": c.id}
-
-    @app.delete("/api/conversations/{cid}/collect/{folder_id}")
-    def api_conversation_uncollect(cid: str, folder_id: str, user: User = Depends(require_user)) -> dict[str, Any]:
-        get_folders_store().remove(user.id, cid, folder_id)
-        return {"ok": True}
-
-    @app.get("/api/conversations/{cid}/folders")
-    def api_conversation_folders(cid: str, user: User = Depends(require_user)) -> dict[str, Any]:
-        fids = get_folders_store().folder_ids_for_conversation(user.id, cid)
-        return {"folder_ids": fids}
+    # 会话文件夹 + 收藏路由已拆到 app/api/routes/folders.py（见下方 include_router）。
 
     # ============================================================ semantic (read-only)
 
@@ -1225,50 +741,6 @@ def create_app() -> FastAPI:
 # =============================================================================
 # helpers
 # =============================================================================
-
-def _user_dict(u: User) -> dict[str, Any]:
-    return {
-        "id": u.id, "username": u.username, "role": u.role, "created_at": u.created_at,
-        "email": u.email or "",
-        "must_change_password": bool(u.must_change_password),
-        "is_active": bool(getattr(u, "is_active", True)),
-    }
-
-
-def _trusted_result_for_trace(store, user: User, conversation_id: str, trace_id: str) -> dict[str, Any]:
-    """按 (conversation_id, trace_id) 从会话存储取回**服务端可信**的问数结果。
-
-    安全（P0）：报告生成 / 飞书推送绝不信任前端传入的 question/answer/plan/sql/narrative，
-    一律以服务端落地的 assistant 消息为准，杜绝伪造内容。
-    校验会话归属（user_id 必须匹配），缺参 → 400，找不到 / 越权一律 404（不泄露存在性）。
-    返回 {question, answer, plan, sql}。
-    """
-    conversation_id = (conversation_id or "").strip()
-    trace_id = (trace_id or "").strip()
-    if not conversation_id or not trace_id:
-        raise HTTPException(status_code=400, detail="缺少 conversation_id 或 trace_id")
-    sess = store.get_session(conversation_id)
-    if not sess or sess.user_id != user.id:
-        raise HTTPException(status_code=404, detail="会话不存在或无权访问")
-    msgs = store.list_messages(conversation_id, limit=500)
-    for i, m in enumerate(msgs):
-        if m.role == "assistant" and str((m.payload or {}).get("trace_id") or "") == trace_id:
-            payload = m.payload or {}
-            question = ""
-            for prev in reversed(msgs[:i]):
-                if prev.role == "user":
-                    question = prev.content
-                    break
-            answer = payload.get("answer")
-            plan = payload.get("plan")
-            return {
-                "question": question,
-                "answer": answer if isinstance(answer, dict) else {},
-                "plan": plan if isinstance(plan, dict) else {},
-                "sql": str(payload.get("sql") or ""),
-            }
-    raise HTTPException(status_code=404, detail="未找到该回答（trace_id 无效或结果已过期）")
-
 
 def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=None) -> dict[str, Any]:
     """实际跑问数 + 落地会话消息 + 落地审计日志，返回响应字典。

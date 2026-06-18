@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { api } from "../../api";
+import { confirmDialog } from "../../shared/dialog";
 import type { LLMPreset, LLMPresetTestResult } from "../../types";
 
 /** LLM 设置（仅 admin）—— 多套预设（preset）+ 保存前强制测试。
@@ -168,7 +169,7 @@ export function LLMSettingsPage() {
     catch (e: any) { setErr(e?.message || String(e)); }
   }
   async function remove(p: LLMPreset) {
-    if (!confirm(`确定删除预设「${p.name}」？\n它将被软删除（is_active=0）。`)) return;
+    if (!(await confirmDialog({ message: `确定删除预设「${p.name}」？\n它将被软删除（is_active=0）。`, danger: true }))) return;
     try { await api.adminDeleteLLMPreset(p.id); setToast(`已删除「${p.name}」`); await refresh(); notifyProvidersChanged(); setTimeout(() => setToast(null), 3000); }
     catch (e: any) { setErr(e?.message || String(e)); }
   }

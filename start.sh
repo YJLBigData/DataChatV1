@@ -70,13 +70,40 @@ is_placeholder() {
     *) return 1 ;;
   esac
 }
+env_set() {
+  local key="$1"
+  local value="$2"
+  local file="$BACKEND/.env"
+  local tmp="${file}.tmp.$$"
+  touch "$file"
+  awk -v k="$key" -v v="$value" '
+    BEGIN { done = 0 }
+    $0 !~ /^[[:space:]]*#/ && index($0, k "=") == 1 {
+      print k "=" v
+      done = 1
+      next
+    }
+    { print }
+    END {
+      if (!done) print k "=" v
+    }
+  ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+sql_literal() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
 
 api_key="$(env_get DASHSCOPE_API_KEY)"
 if is_placeholder "$api_key"; then
-  red "  backend/.env 中 DASHSCOPE_API_KEY 为空，请填入再启动"
-  exit 2
+  if [ "${DATACHAT_REQUIRE_LLM_KEY:-0}" = "1" ]; then
+    red "  backend/.env 中 DASHSCOPE_API_KEY 为空，请填入再启动"
+    exit 2
+  fi
+  gray "  · backend/.env 中 DASHSCOPE_API_KEY 未配置；本地服务继续启动"
+  gray "    问数/报告等 LLM 功能需在后台 LLM 设置或 backend/.env 配置后使用"
+else
+  green "  ✓ backend/.env 已配置 (API key 长度 ${#api_key})"
 fi
-green "  ✓ backend/.env 已配置 (API key 长度 ${#api_key})"
 
 export APP_ENV="${APP_ENV:-$(env_get APP_ENV)}"; export APP_ENV="${APP_ENV:-local}"
 export MYSQL_HOST="${MYSQL_HOST:-$(env_get MYSQL_HOST)}"; export MYSQL_HOST="${MYSQL_HOST:-127.0.0.1}"
@@ -98,16 +125,17 @@ mysql_ping() {
 }
 private_mysql_socket_ping() {
   command -v mysql >/dev/null 2>&1 || return 1
-  mysql --protocol=SOCKET --socket="$ROOT/.mysql/mysql.sock" -u root \
+  MYSQL_PWD="${MYSQL_PASSWORD:-}" mysql --protocol=SOCKET --socket="$ROOT/.mysql/mysql.sock" -u root \
     -Nse "SELECT 1" >/dev/null 2>&1
 }
 configure_private_mysql_access() {
   command -v mysql >/dev/null 2>&1 || return 1
-  mysql --protocol=SOCKET --socket="$ROOT/.mysql/mysql.sock" -u root <<SQL >/dev/null 2>&1
-CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '';
-CREATE USER IF NOT EXISTS 'root'@'localhost' IDENTIFIED BY '';
+  local pwd_sql
+  pwd_sql="$(sql_literal "${MYSQL_PASSWORD:-}")"
+  MYSQL_PWD="${MYSQL_PASSWORD:-}" mysql --protocol=SOCKET --socket="$ROOT/.mysql/mysql.sock" -u root <<SQL >/dev/null 2>&1
+CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '${pwd_sql}';
+ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '${pwd_sql}';
 GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
-GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
 SQL
 }
@@ -122,14 +150,47 @@ start_private_mysql() {
   local data_dir="$ROOT/.mysql"
   local socket_file="$data_dir/mysql.sock"
   local pid_file="$PID_DIR/mysql.pid"
+  local init_file="$data_dir/init-private.sql"
   mkdir -p "$data_dir" "$LOG_DIR" "$PID_DIR"
   if [ ! -d "$data_dir/mysql" ]; then
+    local leftover_names
+    leftover_names="$(find "$data_dir" -mindepth 1 -maxdepth 1 -print 2>/dev/null || true)"
+    if [ -n "$leftover_names" ]; then
+      local non_runtime
+      non_runtime="$(find "$data_dir" -mindepth 1 -maxdepth 1 \
+        ! -name 'mysql.sock' ! -name 'mysql.sock.lock' ! -name '*.pid' \
+        ! -name 'undo_001' ! -name 'undo_002' ! -name '.DS_Store' \
+        -print -quit 2>/dev/null || true)"
+      if [ -n "$non_runtime" ]; then
+        red "  .mysql 目录存在但不是完整 MySQL 数据目录，且包含非运行残留文件: $non_runtime"
+        red "  请人工确认后清理 .mysql，避免误删本地数据。"
+        return 1
+      fi
+      gray "  清理 .mysql 中的历史运行残留（socket/pid/undo）"
+      find "$data_dir" -mindepth 1 -maxdepth 1 \
+        \( -name 'mysql.sock' -o -name 'mysql.sock.lock' -o -name '*.pid' \
+           -o -name 'undo_001' -o -name 'undo_002' -o -name '.DS_Store' \) \
+        -delete 2>/dev/null || true
+    fi
     gray "  初始化项目私有 MySQL 数据目录: .mysql"
     mysqld --initialize-insecure --datadir="$data_dir" --basedir=/usr/local/mysql --user="$USER" \
       --log-error="$LOG_DIR/mysql-init.log" >/dev/null 2>&1 || return 1
     # macOS 上 initialize 后残留的 undo 文件会让首次启动误判重复创建，删除后由正式启动重建。
     rm -f "$data_dir/undo_001" "$data_dir/undo_002"
   fi
+  local pwd_sql db_sql
+  pwd_sql="$(sql_literal "${MYSQL_PASSWORD:-}")"
+  db_sql="${MYSQL_DATABASE//\`/\`\`}"
+  cat > "$init_file" <<SQL
+ALTER USER 'root'@'localhost' IDENTIFIED BY '${pwd_sql}';
+CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '${pwd_sql}';
+ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '${pwd_sql}';
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
+CREATE DATABASE IF NOT EXISTS \`${db_sql}\` CHARACTER SET utf8mb4;
+FLUSH PRIVILEGES;
+SQL
+  chmod 600 "$init_file" 2>/dev/null || true
   if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
     return 0
   fi
@@ -144,6 +205,7 @@ start_private_mysql() {
     --bind-address=127.0.0.1 \
     --skip-name-resolve \
     --mysqlx=0 \
+    --init-file="$init_file" \
     --lower-case-table-names=2 \
     > "$LOG_DIR/mysql.out" 2>&1 &
   echo $! > "$pid_file"
@@ -185,7 +247,11 @@ else
       fi
 
       private_mysql_ready=0
-      export MYSQL_PASSWORD=""
+      if [ -z "${MYSQL_PASSWORD:-}" ]; then
+        export MYSQL_PASSWORD="Local$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)@1"
+        env_set MYSQL_PASSWORD "$MYSQL_PASSWORD"
+        gray "  已生成项目私有 MySQL 密码并写入 backend/.env（不回显）"
+      fi
       if start_private_mysql; then
         for _ in $(seq 1 60); do private_mysql_socket_ping && break; sleep 1; done
         configure_private_mysql_access || true
@@ -301,12 +367,16 @@ fi
 lsof -ti tcp:$PORT 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
 cd "$BACKEND"
-# 阶段1.1：多 worker uvicorn（master + N children），充分利用多核
-#   · 本地默认 2 个 worker；可用 UVICORN_WORKERS=N 覆盖
+# uvicorn worker 数：默认 **1**（审计 P0-4）。
+#   原因：专家团后台编排的实时进度(events)/取消是**进程内**线程池状态；多 worker 下
+#   submit/poll/cancel 可能落到不同进程，导致进度丢失或取消失效。问数本身是 I/O 密集
+#   （LLM/DB 网络等待），单 worker + FastAPI 线程池已足够支撑 50 人量级并发。
+#   导出队列/每用户背压等已落共享 SQLite，跨 worker 一致；若确需多 worker，请在反代层
+#   做粘性路由（按用户）或接入外部任务队列后再用 UVICORN_WORKERS=N 覆盖。
 #   · --proxy-headers / --forwarded-allow-ips：让上层 nginx/LB 的真实 IP 与协议头透传
 #   · --timeout-keep-alive 30：长连接复用，降低握手开销
-UVICORN_WORKERS_LOCAL="${UVICORN_WORKERS:-2}"
-gray "  uvicorn workers=${UVICORN_WORKERS_LOCAL} (env UVICORN_WORKERS 可覆盖)"
+UVICORN_WORKERS_LOCAL="${UVICORN_WORKERS:-1}"
+gray "  uvicorn workers=${UVICORN_WORKERS_LOCAL} (env UVICORN_WORKERS 可覆盖；>1 需粘性路由)"
 nohup "$PYBIN" -m uvicorn app.main:app \
   --host 127.0.0.1 --port $PORT --log-level info \
   --workers "$UVICORN_WORKERS_LOCAL" \

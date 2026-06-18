@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { api } from "../../api";
+import { toast } from "../../shared/toast";
 import type { PermissionsAllItem, SemanticOverview } from "../../types";
 
 /**
@@ -90,7 +91,7 @@ export function PermissionsPage() {
       });
       await refresh();
       setActive(null);
-    } catch (e: any) { alert("保存失败: " + (e?.message || e)); }
+    } catch (e: any) { toast.error("保存失败: " + (e?.message || e)); }
     finally { setBusy(false); }
   }
 
