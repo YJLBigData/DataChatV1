@@ -90,10 +90,13 @@ def delete_export(job_id: str, user: User = Depends(require_user)) -> dict[str, 
     job = store.get(job_id)
     if not job or job.user_id != user.id:
         raise HTTPException(status_code=404, detail="导出任务不存在")
+    file_deleted = False
     try:
         if job.path and Path(job.path).exists():
             Path(job.path).unlink()
-    except Exception:  # noqa: BLE001
-        pass
-    store.delete(job_id)
-    return {"ok": True}
+            file_deleted = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("delete export file failed job=%s user=%s path=%s: %s", job_id, user.id, job.path, exc)
+    deleted = store.delete(job_id)
+    logger.info("delete export job=%s user=%s deleted=%s file_deleted=%s", job_id, user.id, deleted, file_deleted)
+    return {"ok": deleted, "deleted": deleted, "job_id": job_id, "file_deleted": file_deleted}

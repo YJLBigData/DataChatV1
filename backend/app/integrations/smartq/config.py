@@ -21,7 +21,9 @@ class SmartQConfig:
     user_token: str
     server_domain: str
     default_user_id: str
-    api_base: str          # 私有化部署 OpenAPI 基路径（可按部署调整，不写死）
+    api_base: str          # 私有化部署 OpenAPI 前缀；飞鹤环境为空，保留兼容其它网关前缀
+    timeout: float
+    debug: bool
 
     @property
     def configured(self) -> bool:
@@ -33,6 +35,10 @@ class SmartQConfig:
 
 
 def load_smartq_config() -> SmartQConfig:
+    try:
+        timeout = float(os.environ.get("SMARTQ_TIMEOUT_SECONDS", "30") or "30")
+    except ValueError:
+        timeout = 30.0
     return SmartQConfig(
         enabled=_truthy(os.environ.get("SMARTQ_ENABLED", "0")),
         api_key=(os.environ.get("SMARTQ_API_KEY", "") or "").strip(),
@@ -40,7 +46,9 @@ def load_smartq_config() -> SmartQConfig:
         user_token=(os.environ.get("SMARTQ_USER_TOKEN", "") or "").strip(),
         server_domain=(os.environ.get("SMARTQ_SERVER_DOMAIN", "") or "").strip().rstrip("/"),
         default_user_id=(os.environ.get("SMARTQ_DEFAULT_USER_ID", "") or "").strip(),
-        api_base=(os.environ.get("SMARTQ_API_BASE", "/quickbi/openapi") or "").strip(),
+        api_base=(os.environ.get("SMARTQ_API_BASE", "") or "").strip().rstrip("/"),
+        timeout=timeout if timeout > 0 else 30.0,
+        debug=_truthy(os.environ.get("SMARTQ_DEBUG", "0")),
     )
 
 
@@ -62,6 +70,8 @@ def masked_diagnostics() -> dict:
         "ready": cfg.ready,
         "server_domain": cfg.server_domain or "(未配置)",
         "api_base": cfg.api_base,
+        "timeout": cfg.timeout,
+        "debug": cfg.debug,
         "api_key": _mask(cfg.api_key),
         "api_secret": _mask(cfg.api_secret),
         "user_token": _mask(cfg.user_token),

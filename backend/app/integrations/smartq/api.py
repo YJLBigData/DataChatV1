@@ -23,7 +23,6 @@ from app.core.auth import User
 
 from .client import SmartQClient, SmartQError, resolve_smartq_user_id
 from .config import load_smartq_config, masked_diagnostics
-from .normalize import normalize_smartq_answer, smartq_answer_is_substantive
 
 logger = logging.getLogger("datachat.smartq")
 
@@ -55,7 +54,7 @@ def smartq_datasets(user: User = Depends(require_user)) -> dict[str, Any]:
         return {"ok": False, "error": "智能小Q未启用或未配置完整。", "items": []}
     uid = resolve_smartq_user_id(cfg, fallback=user.email or user.username)
     try:
-        items = SmartQClient(cfg).list_datasets(user_id=uid)
+        items = SmartQClient(cfg).get_dataset_list(user_id=uid)
         return {"ok": True, "items": items}
     except SmartQError as exc:
         return {"ok": False, "error": exc.message, "items": []}
@@ -80,9 +79,29 @@ def smartq_dataset_status(cube_id: str, user: User = Depends(require_user)) -> d
 
 @router.post("/query")
 def smartq_query(req: SmartQQueryReq = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
-    question = (req.question or "").strip()
+    return execute_smartq_query(
+        user=user,
+        question=req.question,
+        cube_ids=(req.cube_ids or ([req.cube_id] if req.cube_id else [])),
+        conversation_id=req.conversation_id,
+        persist=True,
+    )
+
+
+def execute_smartq_query(*, user: User, question: str, cube_ids: list[str],
+                         conversation_id: Optional[str] = None,
+                         persist: bool = True) -> dict[str, Any]:
+    """SmartQ 统一业务入口：问数页、专家团、/api/smartq/query 共用。
+
+    返回结构同时兼容单数据集现有 AnswerPayload 和多数据集分组结果。
+    """
+    question = (question or "").strip()
     if not question:
         return {"ok": False, "error": "请输入问题"}
+    cube_ids = [str(c).strip() for c in (cube_ids or []) if str(c or "").strip()]
+    cube_ids = list(dict.fromkeys(cube_ids))
+    if not cube_ids:
+        return {"ok": False, "error": "请选择智能小Q数据集"}
     cfg = load_smartq_config()
     if not cfg.ready:
         return {"ok": False, "error": "智能小Q未启用或未配置完整，请联系管理员。"}
@@ -90,22 +109,24 @@ def smartq_query(req: SmartQQueryReq = Body(...), user: User = Depends(require_u
     uid = resolve_smartq_user_id(cfg, fallback=user.email or user.username)
     client = SmartQClient(cfg)
 
-    # 数据集授权双保险：能拿到授权清单时，越权 cube 直接业务拒绝（不发起查询）。
-    # 拿不到清单（如网络/接口波动）则不拦，交由查询本身 + SmartQ 侧把关。
-    if req.cube_id:
-        try:
-            authorized = {d["cube_id"] for d in client.list_datasets(user_id=uid)}
-            if authorized and req.cube_id not in authorized:
+    dataset_names: dict[str, str] = {}
+    try:
+        datasets = client.get_dataset_list(user_id=uid)
+        authorized = {d["cube_id"] for d in datasets}
+        dataset_names = {d["cube_id"]: d.get("name") or d["cube_id"] for d in datasets}
+        if authorized:
+            denied = [cid for cid in cube_ids if cid not in authorized]
+            if denied:
                 return {"ok": False, "error": "无权访问该数据集，或数据集不存在。"}
-        except SmartQError:
-            pass
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("smartq cube authorization check skipped: %s", exc)
+    except SmartQError as exc:
+        # 数据集列表接口是主能力之一，但查询本身仍由 Quick BI 权限兜底。
+        logger.warning("smartq dataset authorization list unavailable: %s", exc.message)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("smartq cube authorization check skipped: %s", exc)
 
     try:
-        raw = client.query(
-            user_question=question, cube_id=req.cube_id or "",
-            cube_ids=req.cube_ids or None, user_id=uid,
+        result = client.query_multi_datasets(
+            question=question, cube_ids=cube_ids, user_id=uid, cube_names=dataset_names,
         )
     except SmartQError as exc:
         return {"ok": False, "error": exc.message}
@@ -113,24 +134,32 @@ def smartq_query(req: SmartQQueryReq = Body(...), user: User = Depends(require_u
         logger.exception("smartq query failed: %s", exc)
         return {"ok": False, "error": "智能小Q查询失败，请稍后再试。"}
 
-    answer = normalize_smartq_answer(raw, question=question)
-    # 假成功防线：无行 / 无结论 / 无 SQL 的空壳响应不当成功结果展示（审计 P0）。
-    if not smartq_answer_is_substantive(answer):
-        logger.info("smartq query returned no substantive result for cube=%s", req.cube_id)
-        return {"ok": False, "error": "智能小Q未返回有效结果，请确认所选数据集权限或换个问法。"}
+    if not result.get("success"):
+        return {"ok": False, "error": result.get("error") or "智能小Q未返回有效结果，请确认数据集权限或换个问法。"}
 
+    answer = result.get("answer") or {}
     sql = str(answer.get("explainability", {}).get("sql", "") or "")
-    # 落库到问数会话（与普通问数共享 trace/导出/反馈/报告/飞书链路）——拿到可信 trace_id。
-    conversation_id, trace_id = _persist_smartq_turn(user, req.conversation_id, question, answer, sql)
+    trace_id = ""
+    if persist:
+        # 落库到问数会话（与普通问数共享 trace/导出/反馈/报告/飞书链路）。
+        conversation_id, trace_id = _persist_smartq_turn(user, conversation_id, question, answer, sql, result)
     return {
         "ok": True, "question": question, "answer": answer, "sql": sql,
         "conversation_id": conversation_id, "trace_id": trace_id,
         "rows": int(answer.get("table", {}).get("row_count") or 0),
+        "smartq": {
+            "mode": result.get("mode"),
+            "native_multi_supported": result.get("native_multi_supported"),
+            "results": result.get("results") or [],
+            "summary": result.get("summary") or "",
+            "native_error": result.get("native_error") or "",
+        },
     }
 
 
 def _persist_smartq_turn(user: User, conversation_id: Optional[str], question: str,
-                         answer: dict[str, Any], sql: str) -> tuple[str, str]:
+                         answer: dict[str, Any], sql: str,
+                         smartq_result: Optional[dict[str, Any]] = None) -> tuple[str, str]:
     """把一轮 SmartQ 问答落库到**问数会话存储**（真相源），返回 (conversation_id, trace_id)。
 
     与普通问数完全一致的 payload 形态：assistant 消息带 {answer, plan, sql, trace_id}，
@@ -157,6 +186,13 @@ def _persist_smartq_turn(user: User, conversation_id: Optional[str], question: s
                 "answer": answer, "plan": {}, "sql": sql,
                 "rows": int(answer.get("table", {}).get("row_count") or 0),
                 "cached": False, "trace_id": trace_id, "source": "smartq",
+                "smartq": {
+                    "mode": (smartq_result or {}).get("mode"),
+                    "native_multi_supported": (smartq_result or {}).get("native_multi_supported"),
+                    "results": (smartq_result or {}).get("results") or [],
+                    "summary": (smartq_result or {}).get("summary") or "",
+                    "native_error": (smartq_result or {}).get("native_error") or "",
+                },
             },
         )
         return cid, trace_id

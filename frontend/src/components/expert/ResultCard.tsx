@@ -24,6 +24,12 @@ function ExpertBlock({ c }: { c: ExpertTeamResult["experts"][number] }) {
               </button>
               {open ? (
                 <div className="mt-1 space-y-1">
+                  {c.data.smartq?.mode ? (
+                    <div className="text-[11px] text-blue-500">
+                      SmartQ：{c.data.smartq.mode}
+                      {c.data.smartq.native_multi_supported === false ? "（逐数据集兼容）" : ""}
+                    </div>
+                  ) : null}
                   {c.data.table_preview ? <pre className="overflow-x-auto rounded bg-slate-50 p-2 text-[11px] text-slate-600">{c.data.table_preview}</pre> : null}
                   {c.data.sql ? <pre className="overflow-x-auto rounded bg-slate-900/90 p-2 text-[11px] text-slate-100">{c.data.sql}</pre> : null}
                 </div>

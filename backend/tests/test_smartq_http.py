@@ -58,8 +58,36 @@ def _patch_client(monkeypatch, *, datasets, query_result):
         def list_datasets(self, *, user_id):
             return datasets
 
-        def query(self, **kwargs):
-            return query_result
+        def get_dataset_list(self, *, user_id):
+            return datasets
+
+        def query_multi_datasets(self, **kwargs):
+            from app.integrations.smartq.normalize import normalize_smartq_answer, smartq_answer_is_substantive
+            answer = normalize_smartq_answer(query_result, question=kwargs.get("question") or "")
+            ok = smartq_answer_is_substantive(answer)
+            cube_ids = kwargs.get("cube_ids") or []
+            return {
+                "success": ok,
+                "question": kwargs.get("question") or "",
+                "mode": "single_dataset" if len(cube_ids) <= 1 else "multi_dataset",
+                "native_multi_supported": None,
+                "answer": answer if ok else {},
+                "sql": (answer.get("explainability") or {}).get("sql") or "",
+                "chart_type": (answer.get("chart") or {}).get("type") or "",
+                "results": [{
+                    "cube_id": cube_ids[0] if cube_ids else "",
+                    "cube_name": cube_ids[0] if cube_ids else "",
+                    "success": ok,
+                    "sql": (answer.get("explainability") or {}).get("sql") or "",
+                    "chart_type": (answer.get("chart") or {}).get("type") or "",
+                    "data": (answer.get("table") or {}).get("display_rows") or [],
+                    "answer": answer if ok else {},
+                    "summary": answer.get("narrative") if ok else "",
+                    "error": None if ok else "empty",
+                }],
+                "summary": answer.get("narrative") if ok else "",
+                "error": None if ok else "empty",
+            }
 
     monkeypatch.setattr(api_mod, "SmartQClient", _Fake)
 
@@ -111,3 +139,42 @@ def test_smartq_substantive_persists_with_trace(client, auth_headers, monkeypatc
     trusted = _trusted_result_for_trace(get_conversation_store(), user, cid, trace)
     assert trusted["question"] == "各大区销售额"
     assert trusted["answer"]["table"]["row_count"] == 2
+
+
+def test_chat_entry_uses_smartq_context(client, auth_headers, monkeypatch):
+    _patch_client(
+        monkeypatch,
+        datasets=[{"cube_id": "cube1", "name": "销售", "theme": ""}],
+        query_result={
+            "ConclusionText": "记录数为 10",
+            "LogicSql": "SELECT COUNT(*) FROM t",
+            "Headers": ["记录数"],
+            "Values": [[10]],
+            "ChartType": "INDICATOR_CARD",
+        },
+    )
+    r = client.post("/api/chat", headers=auth_headers,
+                    json={"question": "这个数据集有多少条记录？", "smartq_cube_ids": ["cube1"]}).json()
+    assert r["ok"] is True
+    assert r["smartq"]["mode"] == "single_dataset"
+    assert r["answer"]["table"]["display_rows"] == [["10"]]
+
+
+def test_expert_entry_passes_smartq_context(client, auth_headers, monkeypatch):
+    import app.expert_team.api as expert_api_mod
+
+    seen = {}
+
+    class _FakeOrchestrator:
+        def run(self, question, **kwargs):
+            seen["smartq_cube_ids"] = kwargs.get("smartq_cube_ids")
+            return {
+                "ok": True, "route": "fast", "plan": "ok", "experts": [],
+                "report": "ok", "warnings": [], "elapsed_ms": 1,
+            }
+
+    monkeypatch.setattr(expert_api_mod, "get_orchestrator", lambda: _FakeOrchestrator())
+    r = client.post("/api/expert-team/chat", headers=auth_headers,
+                    json={"question": "分析一下", "smartq_cube_ids": ["cube1"]}).json()
+    assert r["ok"] is True
+    assert seen["smartq_cube_ids"] == ["cube1"]

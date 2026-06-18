@@ -21,6 +21,8 @@ class ChatRequest(BaseModel):
     skip_llm_narrative: bool = False
     # 右上角下拉框选的模型，None=用 env 默认（线上=feihe）
     llm_provider: Optional[str] = None
+    # 顶部「数据反问」选择的 Quick BI 智能小Q数据集；有值时本轮问数优先走 SmartQ。
+    smartq_cube_ids: list[str] = []
 
 
 class ConversationCreateReq(BaseModel):

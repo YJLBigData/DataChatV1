@@ -15,9 +15,9 @@ import { MemberCard } from "../expert/MemberCard";
 import { MemberEditor, EMPTY_EDITOR, type EditorState } from "../expert/MemberEditor";
 import { ResultCard } from "../expert/ResultCard";
 import type { ExpertTeamHook } from "../../hooks/useExpertTeam";
-import type { AuthUser, ExpertCard, ExpertTeamBootstrap, ExpertTurn } from "../../types";
+import type { AuthUser, ExpertCard, ExpertTeamBootstrap, ExpertTurn, SmartQDataset } from "../../types";
 
-interface Props { user: AuthUser; llmProvider?: string | null; expert: ExpertTeamHook }
+interface Props { user: AuthUser; llmProvider?: string | null; expert: ExpertTeamHook; smartqDatasets?: SmartQDataset[] }
 
 /** 把后台 job 的进度事件翻译成一句中文忙碌提示。 */
 function busyText(t: ExpertTurn): string {
@@ -32,7 +32,7 @@ function busyText(t: ExpertTurn): string {
 }
 
 /* ===================================================================== 主页面 */
-export function ExpertPanelPage({ user, llmProvider, expert }: Props) {
+export function ExpertPanelPage({ user, llmProvider, expert, smartqDatasets = [] }: Props) {
   void user;  // 暂未在本页直接使用，保留以备权限/个性化扩展
   const [boot, setBoot] = useState<ExpertTeamBootstrap | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -220,6 +220,7 @@ export function ExpertPanelPage({ user, llmProvider, expert }: Props) {
         <div className="mx-auto w-full max-w-3xl">
           <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
             <span>{selected.size ? `已选 ${selected.size} 位专家` : "自动调度"}</span>
+            {smartqDatasets.length ? <span className="text-blue-500">数据反问：{smartqDatasets.map((d) => d.name).join("、")}</span> : null}
             {!empty ? <button type="button" onClick={openCreate} className="text-slate-400 hover:text-blue-500">+ 新建技能</button> : null}
             <label className="ml-auto flex cursor-pointer items-center gap-1 text-slate-500">
               <input type="checkbox" checked={wantReport} onChange={(e) => setWantReport(e.target.checked)} />

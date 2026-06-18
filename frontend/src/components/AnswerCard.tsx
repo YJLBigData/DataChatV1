@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 
-import type { ChartMode, ChatTurn } from "../types";
+import type { ChartMode, ChatTurn, SmartQDatasetResult } from "../types";
 import { detectChartModes } from "../utils/chartDetect";
 import { ChartSwitcher } from "./ChartSwitcher";
 // 懒加载：echarts(chart-vendor ~1.1MB) 只在真正切到图表时才下载，
@@ -22,6 +22,57 @@ interface Props {
   onExportExcel?: () => Promise<{ ok: boolean; msg: string }>;
   /** 答案反馈：up=采纳（沉淀为同域 few-shot 范例），down=不准（进 bad case 库） */
   onFeedback?: (vote: "up" | "down") => Promise<{ ok: boolean; msg: string }>;
+}
+
+function SmartQGroupedResults({ results }: { results: SmartQDatasetResult[] }) {
+  if (!results || results.length <= 1) return null;
+  return (
+    <div className="mt-4 border-t pt-3" style={{ borderColor: "#eef1f8" }}>
+      <div className="mb-2 text-[12px] font-medium text-slate-500">智能小Q多数据集结果</div>
+      <div className="space-y-3">
+        {results.map((item) => {
+          const table = item.answer?.table;
+          const safeTable = {
+            columns: table?.columns || [],
+            rows: table?.rows || [],
+            display_columns: table?.display_columns || [],
+            display_rows: table?.display_rows || [],
+            row_count: table?.row_count ?? 0,
+            elapsed_ms: table?.elapsed_ms ?? 0,
+          };
+          return (
+            <div key={item.cube_id} className="border-l-2 border-blue-200 pl-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[13px] font-semibold text-slate-700">{item.cube_name || item.cube_id}</span>
+                <span className={item.success ? "qq-pill-blue" : "rounded bg-rose-50 px-1.5 py-0.5 text-[10px] text-rose-500"}>
+                  {item.success ? "成功" : "失败"}
+                </span>
+                {item.chart_type ? <span className="qq-pill-grey">{item.chart_type}</span> : null}
+              </div>
+              {item.success ? (
+                <>
+                  {item.summary ? <div className="mt-1 text-[12px] leading-6 text-slate-600">{item.summary}</div> : null}
+                  {safeTable.row_count > 0 ? (
+                    <div className="mt-2">
+                      <TableView table={safeTable} />
+                    </div>
+                  ) : null}
+                  {item.sql ? (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-[11px] text-blue-500">查看 SQL</summary>
+                      <pre className="mt-1 overflow-x-auto rounded bg-slate-900/90 p-2 text-[11px] text-slate-100">{item.sql}</pre>
+                    </details>
+                  ) : null}
+                </>
+              ) : (
+                <div className="mt-1 text-[12px] text-rose-500">{item.error || "查询失败"}</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -122,6 +173,7 @@ export function AnswerCard({ turn, onPickSuggestion, onPickClarify, onPushFeishu
               {answer.risk_notes.map((r, i) => <div key={i}>· {r}</div>)}
             </div>
           ) : null}
+          <SmartQGroupedResults results={result.smartq?.results || []} />
         </div>
       </div>
 

@@ -15,6 +15,7 @@ _CHART_MAP = {
     "table": "table", "line": "line", "column": "bar", "bar": "bar_horizontal",
     "pie": "pie", "funnel": "funnel", "scatter": "scatter", "area": "area",
     "kpi": "kpi", "card": "kpi", "number": "kpi",
+    "indicator_card": "kpi", "indicatorcard": "kpi", "single_value": "kpi",
 }
 
 
@@ -30,13 +31,18 @@ def _first(d: dict[str, Any], *keys: str, default: Any = None) -> Any:
 
 
 def _columns(payload: dict[str, Any]) -> list[dict[str, str]]:
-    cols = _first(payload, "Columns", "Headers", "ColumnList", default=None)
+    cols = _first(payload, "Columns", "Headers", "ColumnList", "columns", "headers", "metaType", default=None)
     out: list[dict[str, str]] = []
-    if isinstance(cols, list):
+    if isinstance(cols, dict):
+        # Quick BI 常见形态：metaType: {"记录数": "DOUBLE"}
+        for key in cols.keys():
+            label = str(key)
+            out.append({"key": label, "label": label})
+    elif isinstance(cols, list):
         for c in cols:
             if isinstance(c, dict):
-                key = str(_first(c, "Name", "Column", "Field", "Key", default="") or "")
-                label = str(_first(c, "Label", "Alias", "Caption", "Name", default=key) or key)
+                key = str(_first(c, "Name", "Column", "Field", "Key", "k", "name", "key", default="") or "")
+                label = str(_first(c, "Label", "Alias", "Caption", "Name", "caption", "k", default=key) or key)
             else:
                 key = label = str(c)
             out.append({"key": key or label, "label": label or key})
@@ -44,13 +50,17 @@ def _columns(payload: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _rows(payload: dict[str, Any], col_keys: list[str]) -> list[list[str]]:
-    data = _first(payload, "Values", "DataList", "Data", "Rows", default=None)
+    data = _first(payload, "Values", "DataList", "Data", "Rows", "values", "dataList", "rows", default=None)
     rows: list[list[str]] = []
     if isinstance(data, list):
         for r in data:
             if isinstance(r, dict):
-                if col_keys:
-                    rows.append([_cell(r.get(k)) for k in col_keys])
+                # Quick BI 常见形态：values: [{"row": [682127]}]
+                nested = _first(r, "row", "Row", "values", "Values", default=None)
+                if isinstance(nested, (list, tuple)):
+                    rows.append([_cell(v) for v in nested])
+                elif col_keys:
+                    rows.append([_cell(_first(r, k, default="")) for k in col_keys])
                 else:
                     rows.append([_cell(v) for v in r.values()])
             elif isinstance(r, (list, tuple)):

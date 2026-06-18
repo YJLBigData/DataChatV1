@@ -94,8 +94,21 @@ export function ExportQueueButton() {
   }, [refresh]);
 
   const remove = useCallback(async (id: string) => {
-    try { await api.deleteExport(id); refresh(); } catch { toast.error("删除失败"); }
-  }, [refresh]);
+    const before = jobs;
+    setJobs((arr) => arr.filter((j) => j.id !== id));
+    try {
+      const res = await api.deleteExport(id);
+      if (res && res.ok === false) {
+        setJobs(before);
+        toast.error("删除失败");
+        return;
+      }
+      await refresh();
+    } catch {
+      setJobs(before);
+      toast.error("删除失败");
+    }
+  }, [jobs, refresh]);
 
   return (
     <div className="relative">

@@ -19,6 +19,7 @@ import { ExportQueueButton } from "./components/ExportQueueButton";
 import { LoginScreen } from "./components/LoginScreen";
 import { PasswordModal } from "./components/PasswordModal";
 import { Sidebar } from "./components/Sidebar";
+import { SmartQDatasetButton } from "./components/SmartQDatasetButton";
 import { UserMenu } from "./components/UserMenu";
 import { ChatPage } from "./components/pages/ChatPage";
 import { ExpertPanelPage } from "./components/pages/ExpertPanelPage";
@@ -28,7 +29,7 @@ import { PermissionsPage } from "./components/pages/PermissionsPage";
 import { ReportTemplatesPage } from "./components/pages/ReportTemplatesPage";
 import { SemanticPage } from "./components/pages/SemanticPage";
 import { UsersPage } from "./components/pages/UsersPage";
-import type { AuthUser, BootstrapInfo, PageId } from "./types";
+import type { AuthUser, BootstrapInfo, PageId, SmartQDataset } from "./types";
 
 /** 专家团文件夹/收藏接口集合（与问数完全独立的一套，传给复用的 ConversationList）。 */
 const EXPERT_FOLDER_SCOPE: FolderScope = {
@@ -58,15 +59,17 @@ export default function App() {
 
   /* --------------- LLM provider 切换（右上角下拉，每次 chat 请求都传） --------------- */
   const { llmProviders, llmDefault, llmChoice, setLlmChoice } = useLLMProviders(!!user);
+  const [smartqCubeIds, setSmartqCubeIds] = useState<string[]>([]);
+  const [smartqPickedDatasets, setSmartqPickedDatasets] = useState<SmartQDataset[]>([]);
 
   /* 问数 / 专家团：两套 App 级状态容器（切页/刷新不中断；红点统一管理）。 */
-  const chat = useChat({ enabled: !!user, user, llmChoice });
-  const expert = useExpertTeam(!!user);
+  const chat = useChat({ enabled: !!user, user, llmChoice, smartqCubeIds });
+  const expert = useExpertTeam(!!user, { smartqCubeIds });
 
   /* ----------------------------- 401 handling ------------------------------ */
   const chatReset = chat.reset;
   useEffect(() => {
-    const fn = () => { setUser(null); chatReset(); };
+    const fn = () => { setUser(null); chatReset(); setSmartqCubeIds([]); setSmartqPickedDatasets([]); };
     window.addEventListener("datachat:unauthorized", fn);
     return () => window.removeEventListener("datachat:unauthorized", fn);
   }, [chatReset]);
@@ -92,7 +95,7 @@ export default function App() {
     setUser(r.user);
   }, []);
   const onLogout = useCallback(() => {
-    auth.clear(); setUser(null); chatReset(); setPage("chat");
+    auth.clear(); setUser(null); chatReset(); setSmartqCubeIds([]); setSmartqPickedDatasets([]); setPage("chat");
   }, [chatReset]);
 
   const headerHealth = useMemo(() => {
@@ -233,6 +236,10 @@ export default function App() {
               </div>
             </div>
             <div className="flex items-center gap-3">
+              <SmartQDatasetButton
+                selectedIds={smartqCubeIds}
+                onChange={(ids, datasets) => { setSmartqCubeIds(ids); setSmartqPickedDatasets(datasets); }}
+              />
               {headerHealth}
               <ExportQueueButton />
               <UserMenu user={user} onChangePassword={() => setPwdOpen(true)} onLogout={onLogout} />
@@ -244,7 +251,7 @@ export default function App() {
           )}
 
           {page === "expert" && (
-            <ExpertPanelPage user={user} llmProvider={llmChoice} expert={expert} />
+            <ExpertPanelPage user={user} llmProvider={llmChoice} expert={expert} smartqDatasets={smartqPickedDatasets} />
           )}
 
           {/* ====================== admin pages ====================== */}

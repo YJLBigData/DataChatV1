@@ -89,6 +89,32 @@ export interface AnswerPayload {
   explainability: AnswerExplain;
 }
 
+export interface SmartQDataset {
+  cube_id: string;
+  name: string;
+  theme: string;
+}
+
+export interface SmartQDatasetResult {
+  cube_id: string;
+  cube_name: string;
+  success: boolean;
+  sql: string;
+  chart_type: string;
+  data: any[][];
+  answer?: AnswerPayload;
+  summary?: string;
+  error?: string | null;
+}
+
+export interface SmartQMeta {
+  mode?: "single_dataset" | "native_multi_dataset" | "multi_dataset" | string;
+  native_multi_supported?: boolean | null;
+  native_error?: string;
+  summary?: string;
+  results?: SmartQDatasetResult[];
+}
+
 export interface ChatResult {
   trace_id: string;
   conversation_id: string;
@@ -99,6 +125,7 @@ export interface ChatResult {
   rows: number;
   cached: boolean;
   elapsed_ms: number;
+  smartq?: SmartQMeta;
 }
 
 export interface StageEvent {
@@ -275,7 +302,7 @@ export interface ExpertContribution {
   emoji: string;
   subtask: string;
   analysis: string;
-  data?: { narrative?: string; sql?: string; rows?: number; table_preview?: string };
+  data?: { narrative?: string; sql?: string; rows?: number; table_preview?: string; smartq?: SmartQMeta };
 }
 
 export interface ExpertTeamResult {

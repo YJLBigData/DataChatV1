@@ -18,6 +18,7 @@ export const expertApi = {
     want_report?: boolean;
     llm_provider?: string | null;
     conversation_id?: string | null;
+    smartq_cube_ids?: string[] | null;
   }) =>
     jsonReq<ExpertTeamResult>("/api/expert-team/chat", {
       method: "POST",
@@ -53,6 +54,7 @@ export const expertApi = {
     want_report?: boolean;
     llm_provider?: string | null;
     conversation_id?: string | null;
+    smartq_cube_ids?: string[] | null;
   }) =>
     jsonReq<{ ok: boolean; error?: string; job_id?: string; conversation_id?: string }>(
       "/api/expert-team/chat/async",

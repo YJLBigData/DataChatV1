@@ -101,6 +101,7 @@ class ExpertJobManager:
         expert_ids: Optional[list[str]],
         want_report: bool,
         llm_provider: Optional[str],
+        smartq_cube_ids: Optional[list[str]] = None,
         history: Optional[list[dict[str, str]]] = None,
     ) -> str:
         now = time.time()
@@ -123,7 +124,7 @@ class ExpertJobManager:
         self._pool.submit(
             self._run, job,
             is_admin=is_admin, expert_ids=expert_ids, want_report=want_report,
-            llm_provider=llm_provider, history=history,
+            llm_provider=llm_provider, smartq_cube_ids=smartq_cube_ids, history=history,
         )
         return job_id
 
@@ -238,7 +239,7 @@ class ExpertJobManager:
     # ----------------------------------------------------------------- worker
 
     def _run(self, job: JobState, *, is_admin: bool, expert_ids, want_report: bool,
-             llm_provider, history) -> None:
+             llm_provider, smartq_cube_ids, history) -> None:
         with self._lock:
             if job.cancel_requested:
                 job.status = "cancelled"
@@ -277,6 +278,7 @@ class ExpertJobManager:
                 user_skills=user_skills,
                 overrides=overrides,
                 want_report=want_report,
+                smartq_cube_ids=smartq_cube_ids or None,
                 history=history,
                 on_event=on_event,
             )

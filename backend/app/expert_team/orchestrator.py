@@ -63,6 +63,7 @@ class ExpertTeamOrchestrator:
         user_skills: list[dict[str, Any]] | None = None,
         overrides: dict[str, dict[str, Any]] | None = None,
         want_report: bool = False,
+        smartq_cube_ids: list[str] | None = None,
         history: list[dict[str, str]] | None = None,
         on_event: EventSink = None,
         max_experts: int = 4,
@@ -104,6 +105,8 @@ class ExpertTeamOrchestrator:
         results: list[dict[str, Any]] = []
         warnings: list[str] = []
         by_id = {p.id: p for p in pool}
+        smartq_ids = [str(c).strip() for c in (smartq_cube_ids or []) if str(c or "").strip()]
+        smartq_ids = list(dict.fromkeys(smartq_ids))
         for item in chosen:
             eid = item.get("id")
             p = by_id.get(eid)
@@ -111,12 +114,16 @@ class ExpertTeamOrchestrator:
                 continue
             subtask = item.get("subtask") or question
             data_query = (item.get("data_query") or "").strip()
+            if smartq_ids and not data_query:
+                data_query = subtask or question
             emit("expert", {"status": "start", "id": p.id, "name": p.name,
                             "profession": p.profession, "emoji": p.emoji, "subtask": subtask})
             data_block = ""
             data_meta: dict[str, Any] | None = None
             if data_query:
-                data_meta = self._fetch_data(data_query, user_id=user_id, is_admin=is_admin)
+                data_meta = self._fetch_data(
+                    data_query, user_id=user_id, is_admin=is_admin, smartq_cube_ids=smartq_ids,
+                )
                 data_block = data_meta.get("for_prompt", "")
                 if not data_meta.get("ok"):
                     warnings.append(f"{p.name}：取数未成功，已转为定性分析")
@@ -130,7 +137,7 @@ class ExpertTeamOrchestrator:
                 "subtask": subtask, "analysis": analysis, "ok": ok,
             }
             if data_meta:
-                res["data"] = {k: data_meta.get(k) for k in ("narrative", "sql", "rows", "table_preview")}
+                res["data"] = {k: data_meta.get(k) for k in ("narrative", "sql", "rows", "table_preview", "smartq")}
             results.append(res)
             emit("expert", {"status": "done", "id": p.id, "name": p.name, "ok": ok})
 
@@ -353,10 +360,13 @@ class ExpertTeamOrchestrator:
 
     # ----------------------------------------------------------- data fetch
 
-    def _fetch_data(self, query: str, *, user_id: str, is_admin: bool) -> dict[str, Any]:
+    def _fetch_data(self, query: str, *, user_id: str, is_admin: bool,
+                    smartq_cube_ids: list[str] | None = None) -> dict[str, Any]:
         """复用问数流水线取真实数据。失败/未接入时返回说明，不阻断专家分析。"""
         out: dict[str, Any] = {"query": query, "rows": 0, "sql": "", "narrative": "", "table_preview": "",
                                "for_prompt": "", "ok": True}
+        if smartq_cube_ids:
+            return self._fetch_smartq_data(query, user_id=user_id, smartq_cube_ids=smartq_cube_ids, base=out)
         if self.data_pipe is None:
             out["ok"] = False
             out["for_prompt"] = f"（数据查询「{query}」未接入数据系统，请基于经验与口径定性分析）"
@@ -381,6 +391,51 @@ class ExpertTeamOrchestrator:
         out.update({"narrative": narrative, "sql": sql, "rows": rows, "table_preview": preview})
         out["for_prompt"] = (
             f"取数问题：{query}\n结论：{narrative}\n行数：{rows}\n数据预览：\n{preview}"
+        ).strip()
+        return out
+
+    def _fetch_smartq_data(self, query: str, *, user_id: str, smartq_cube_ids: list[str],
+                           base: dict[str, Any]) -> dict[str, Any]:
+        """专家团取数使用顶部「数据反问」选择的 SmartQ 数据集。"""
+        out = dict(base)
+        try:
+            from app.core.auth import get_auth_store
+            from app.integrations.smartq.api import execute_smartq_query
+
+            user = get_auth_store().get_by_id(user_id)
+            if not user:
+                raise RuntimeError("user not found")
+            res = execute_smartq_query(
+                user=user, question=query, cube_ids=smartq_cube_ids,
+                conversation_id=None, persist=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("expert_team smartq data fetch failed: %s", exc)
+            out["ok"] = False
+            out["for_prompt"] = f"（智能小Q数据集查询「{query}」失败，请基于经验与口径定性分析）"
+            return out
+        if not res.get("ok"):
+            out["ok"] = False
+            out["for_prompt"] = f"（智能小Q数据集查询「{query}」未取到有效数据：{res.get('error') or '未知错误'}）"
+            return out
+        answer = res.get("answer") or {}
+        table = answer.get("table") or {}
+        preview = _table_preview(table)
+        sql = str(res.get("sql") or "")
+        rows = int(res.get("rows") or table.get("row_count") or 0)
+        narrative = str(answer.get("narrative") or "")
+        smartq = res.get("smartq") or {}
+        out.update({
+            "narrative": narrative,
+            "sql": sql,
+            "rows": rows,
+            "table_preview": preview,
+            "smartq": smartq,
+        })
+        mode = smartq.get("mode") or "smartq"
+        out["for_prompt"] = (
+            f"取数来源：Quick BI 智能小Q（{mode}）\n"
+            f"取数问题：{query}\n结论：{narrative}\n行数：{rows}\n数据预览：\n{preview}\nSQL：\n{sql}"
         ).strip()
         return out
 

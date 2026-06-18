@@ -16,7 +16,12 @@ from app.integrations.smartq.normalize import (  # noqa: E402
     smartq_answer_is_substantive,
 )
 from app.integrations.smartq.config import load_smartq_config, masked_diagnostics  # noqa: E402
-from app.integrations.smartq.client import SmartQClient, SmartQError, resolve_smartq_user_id  # noqa: E402
+from app.integrations.smartq.client import (  # noqa: E402
+    QUERY_PATH,
+    SmartQClient,
+    SmartQError,
+    resolve_smartq_user_id,
+)
 
 
 def test_normalize_list_of_dicts():
@@ -50,7 +55,7 @@ def test_disabled_degrades_gracefully(monkeypatch):
     cfg = load_smartq_config()
     assert cfg.ready is False
     try:
-        SmartQClient(cfg)._request("SmartqQueryAbility", {"UserQuestion": "x"})
+        SmartQClient(cfg)._request("POST", QUERY_PATH, json_body={"userQuestion": "x"})
         assert False, "should have raised"
     except SmartQError as exc:
         assert "未启用" in exc.message or "未配置" in exc.message
@@ -90,6 +95,25 @@ def test_substantive_detection():
     assert smartq_answer_is_substantive(empty) is False
 
 
+def test_build_xgw_string_to_sign_is_stable(monkeypatch):
+    monkeypatch.setenv("SMARTQ_API_KEY", "k")
+    monkeypatch.setenv("SMARTQ_API_SECRET", "s")
+    monkeypatch.setenv("SMARTQ_SERVER_DOMAIN", "https://example.invalid")
+    c = SmartQClient(load_smartq_config())
+    s = c._build_string_to_sign(
+        "GET",
+        "/openapi/v2/smartq/query/llmCubeWithThemeList",
+        {"userId": "u1"},
+        {"X-Gw-Timestamp": "1700000000000", "X-Gw-Nonce": "n", "X-Gw-AccessId": "k"},
+    )
+    assert s == (
+        "GET\n"
+        "/openapi/v2/smartq/query/llmCubeWithThemeList\n"
+        "userId=u1\n"
+        "X-Gw-AccessId:k\nX-Gw-Nonce:n\nX-Gw-Timestamp:1700000000000"
+    )
+
+
 def test_request_rejects_business_error(monkeypatch):
     """官方 Success=False / 异常返回形态一律抛 SmartQError（不把空壳当成功）。"""
     monkeypatch.setenv("SMARTQ_ENABLED", "1")
@@ -101,9 +125,11 @@ def test_request_rejects_business_error(monkeypatch):
 
     class _Resp:
         status_code = 200
+        text = "{}"
 
         def __init__(self, payload):
             self._p = payload
+            self.text = str(payload)
 
         def json(self):
             return self._p
@@ -118,29 +144,29 @@ def test_request_rejects_business_error(monkeypatch):
         def __exit__(self, *a):
             return False
 
-        def post(self, *a, **k):
+        def request(self, *a, **k):
             return _Resp(_Client.payload)
 
     import app.integrations.smartq.client as mod
 
     # Success=False → 业务失败
-    _Client.payload = {"Success": False, "Code": "Forbidden", "Message": "no auth"}
+    _Client.payload = {"success": False, "code": "Forbidden", "message": "no auth"}
     monkeypatch.setattr(mod.httpx, "Client", _Client)
     try:
-        client._request("SmartqQueryAbility", {"UserQuestion": "x"})
+        client._request("POST", QUERY_PATH, json_body={"userQuestion": "x"})
         assert False, "should raise on Success=False"
     except SmartQError:
         pass
 
-    # 既无 Success 又无 Result → 异常返回形态
-    _Client.payload = {"RequestId": "abc"}
+    # 既无 success 又无 data/result → 异常返回形态
+    _Client.payload = {"requestId": "abc"}
     try:
-        client._request("SmartqQueryAbility", {"UserQuestion": "x"})
+        client._request("POST", QUERY_PATH, json_body={"userQuestion": "x"})
         assert False, "should raise on empty shell response"
     except SmartQError:
         pass
 
-    # 正常：Success=True + Result → 透传
-    _Client.payload = {"Success": True, "Result": {"ConclusionText": "ok"}}
-    out = client._request("SmartqQueryAbility", {"UserQuestion": "x"})
-    assert out["Result"]["ConclusionText"] == "ok"
+    # 正常：success=True + data → 透传
+    _Client.payload = {"success": True, "data": {"ConclusionText": "ok"}}
+    out = client._request("POST", QUERY_PATH, json_body={"userQuestion": "x"})
+    assert out["data"]["ConclusionText"] == "ok"

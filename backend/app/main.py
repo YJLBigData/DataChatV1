@@ -770,6 +770,73 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
         if len(question) > 8000:
             return friendly_error("INPUT_INVALID", trace_id=trace_id, extra="问题过长（超过 8000 字符）")
 
+        smartq_cube_ids = [str(c).strip() for c in (getattr(req, "smartq_cube_ids", []) or []) if str(c or "").strip()]
+        smartq_cube_ids = list(dict.fromkeys(smartq_cube_ids))
+        if smartq_cube_ids:
+            if on_event:
+                on_event(_simple_event("smartq", "start", {"cube_count": len(smartq_cube_ids)}))
+            started = datetime.utcnow()
+            try:
+                from app.integrations.smartq.api import execute_smartq_query
+                payload = execute_smartq_query(
+                    user=user,
+                    question=question,
+                    cube_ids=smartq_cube_ids,
+                    conversation_id=session_id,
+                    persist=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("[trace=%s user=%s] smartq branch crashed: %s", trace_id, user.username, exc)
+                return friendly_error("CHAT_FAILED", trace_id=trace_id, extra="智能小Q查询失败")
+            if not payload.get("ok"):
+                err = str(payload.get("error") or "智能小Q查询失败")
+                if on_event:
+                    on_event(_simple_event("smartq", "error", {"error": err}))
+                try:
+                    get_query_log_store().record(
+                        trace_id=trace_id, user_id=user.id, username=user.username,
+                        conversation_id=session_id, question=question,
+                        plan={"source": "smartq", "cube_ids": smartq_cube_ids},
+                        sql="", rows=0, elapsed_ms=0, cached=False,
+                        needs_clarify=False, error=err,
+                    )
+                except Exception:
+                    pass
+                return friendly_error("CHAT_FAILED", trace_id=trace_id, extra=err[:80])
+            answer = normalize_chat_result(payload.get("answer"))
+            sql_str = str(payload.get("sql") or "")
+            rows = int(payload.get("rows") or 0)
+            elapsed_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+            if on_event:
+                on_event(_simple_event("smartq", "ok", {
+                    "mode": (payload.get("smartq") or {}).get("mode"),
+                    "cube_count": len(smartq_cube_ids),
+                    "rows": rows,
+                }))
+            try:
+                get_query_log_store().record(
+                    trace_id=str(payload.get("trace_id") or trace_id), user_id=user.id, username=user.username,
+                    conversation_id=session_id, question=question,
+                    plan={"source": "smartq", "mode": (payload.get("smartq") or {}).get("mode"), "cube_ids": smartq_cube_ids},
+                    sql=sql_str, rows=rows, elapsed_ms=elapsed_ms, cached=False,
+                    needs_clarify=False, error="",
+                )
+            except Exception as exc:
+                logger.warning("query_log record failed: %s", exc)
+            return {
+                "ok": True,
+                "trace_id": payload.get("trace_id") or trace_id,
+                "conversation_id": payload.get("conversation_id") or session_id,
+                "question": question,
+                "answer": answer,
+                "plan": {},
+                "sql": sql_str,
+                "rows": rows,
+                "cached": False,
+                "elapsed_ms": elapsed_ms,
+                "smartq": payload.get("smartq") or {},
+            }
+
         history = store.history_for_llm(session_id, limit=4)
         prev_plan: Optional[QueryPlan] = None
         sig = store.latest_assistant_plan_signature(session_id)

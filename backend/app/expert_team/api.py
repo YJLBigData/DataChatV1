@@ -55,6 +55,7 @@ class TeamChatReq(BaseModel):
     want_report: bool = False
     llm_provider: Optional[str] = None
     conversation_id: Optional[str] = None
+    smartq_cube_ids: Optional[list[str]] = None
 
 
 # ---- 会话历史 + 文件夹（与问数完全独立的专家团专属存储）----
@@ -199,6 +200,7 @@ def team_chat(req: TeamChatReq = Body(...), user: User = Depends(require_user)) 
         user_skills=user_skills,
         overrides=overrides,
         want_report=req.want_report,
+        smartq_cube_ids=req.smartq_cube_ids or None,
         on_event=on_event,
     )
     result["events"] = events
@@ -248,6 +250,7 @@ def team_chat_async(req: TeamChatReq = Body(...), user: User = Depends(require_u
             expert_ids=req.expert_ids,
             want_report=bool(req.want_report),
             llm_provider=req.llm_provider,
+            smartq_cube_ids=req.smartq_cube_ids or None,
             history=history,
         )
     except JobRejected as exc:

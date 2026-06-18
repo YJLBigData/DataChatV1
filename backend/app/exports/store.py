@@ -132,9 +132,10 @@ class ExportStore:
             ).fetchall()
         return [ExportJob(**dict(r)) for r in rows]
 
-    def delete(self, job_id: str) -> None:
+    def delete(self, job_id: str) -> bool:
         with self._lock, self._conn() as c:
-            c.execute("DELETE FROM export_job_v1 WHERE id=?", (job_id,))
+            cur = c.execute("DELETE FROM export_job_v1 WHERE id=?", (job_id,))
+            return int(cur.rowcount or 0) > 0
 
     def count_active_for_user(self, user_id: str) -> int:
         """该用户在途（queued|running）导出数 —— 每用户背压（多 worker 共享同一 SQLite）。"""

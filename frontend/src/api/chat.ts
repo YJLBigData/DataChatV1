@@ -75,7 +75,7 @@ export const chatApi = {
     jsonReq<{ ok: boolean }>(`/api/conversations/${cid}`, { method: "DELETE" }),
 
   /* 问数（同步） */
-  chat: (req: { question: string; conversation_id?: string | null; force_refresh?: boolean; llm_provider?: string | null }) =>
+  chat: (req: { question: string; conversation_id?: string | null; force_refresh?: boolean; llm_provider?: string | null; smartq_cube_ids?: string[] | null }) =>
     jsonReq<ChatResult>("/api/chat", { method: "POST", body: JSON.stringify(req) }),
 
   /* LLM provider 下拉（全体用户） */
@@ -101,7 +101,7 @@ export const chatApi = {
 
   /* SSE 流式问数 */
   stream: (
-    req: { question: string; conversation_id?: string | null; force_refresh?: boolean; llm_provider?: string | null },
+    req: { question: string; conversation_id?: string | null; force_refresh?: boolean; llm_provider?: string | null; smartq_cube_ids?: string[] | null },
     onEvent: (evt: StageEvent) => void,
     onDone: (result: ChatResult) => void,
     onError: (err: string) => void,

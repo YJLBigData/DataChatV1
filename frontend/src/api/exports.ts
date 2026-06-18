@@ -9,6 +9,10 @@ export const exportsApi = {
     }),
   listExports: () => jsonReq<{ items: ExportJob[] }>("/api/exports"),
   getExport: (id: string) => jsonReq<ExportJob>(`/api/exports/${encodeURIComponent(id)}`),
-  deleteExport: (id: string) => jsonReq<{ ok: boolean }>(`/api/exports/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  deleteExport: (id: string) =>
+    jsonReq<{ ok: boolean; deleted?: boolean; job_id?: string; file_deleted?: boolean }>(
+      `/api/exports/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
   exportDownloadUrl: (id: string) => `${BASE}/api/exports/${encodeURIComponent(id)}/download`,
 };

@@ -9,7 +9,7 @@
  *    done/error 写回对应轮；若用户已切走该会话 → 加入 unread（红点）。
  *  · SPA 刷新后用 `expertRunningJobs` 重新挂上仍在跑的后台分析。
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api";
 import type { ConversationMeta, ExpertTeamResult, ExpertTurn } from "../types";
@@ -48,7 +48,8 @@ function restoreTurns(msgs: any[], runningJobId?: string): ExpertTurn[] {
   return out;
 }
 
-export function useExpertTeam(enabled: boolean) {
+export function useExpertTeam(enabled: boolean, opts: { smartqCubeIds?: string[] } = {}) {
+  const smartqContextIds = useMemo(() => [...new Set((opts.smartqCubeIds || []).filter(Boolean))], [opts.smartqCubeIds]);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [turnsByConv, setTurnsByConv] = useState<Record<string, ExpertTurn[]>>({});
@@ -163,6 +164,7 @@ export function useExpertTeam(enabled: boolean) {
         expert_ids: opts.expert_ids && opts.expert_ids.length ? opts.expert_ids : null,
         want_report: !!opts.want_report,
         llm_provider: opts.llm_provider ?? undefined,
+        smartq_cube_ids: smartqContextIds.length ? smartqContextIds : null,
         conversation_id: activeIdRef.current,
       });
       if (!r.ok || !r.job_id || !r.conversation_id) {
@@ -192,7 +194,7 @@ export function useExpertTeam(enabled: boolean) {
       updateTurns(ownerKey, (arr) => arr.map((t) => (t.id === turnId ? { ...t, pending: false, error: e?.message || "提交失败" } : t)));
       return { ok: false, error: e?.message || "提交失败" };
     }
-  }, [updateTurns, refreshConversations]);
+  }, [updateTurns, refreshConversations, smartqContextIds]);
 
   /* ------------------------------------------------------------ open / new */
   const openConversation = useCallback(async (cid: string) => {

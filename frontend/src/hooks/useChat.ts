@@ -18,8 +18,9 @@ function uuid(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoice: string }) {
+export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoice: string; smartqCubeIds?: string[] }) {
   const { user, llmChoice } = opts;
+  const smartqContextIds = useMemo(() => [...new Set((opts.smartqCubeIds || []).filter(Boolean))], [opts.smartqCubeIds]);
   const { conversations, setConversations, refreshConversations } = useConversations(opts.enabled);
   const [activeId, setActiveId] = useState<string | null>(null);
   /** 每个对话独立的 turns，draft（未保存）放在 __draft__ key。允许同时多个对话流式进行。 */
@@ -80,7 +81,7 @@ export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoi
           id: m.id, question: m.content, pending: false, events: [],
           result: {
             trace_id: next.payload?.trace_id || "",
-            conversation_id: cid, question: m.content,
+              conversation_id: cid, question: m.content,
             answer: {
               needs_clarify: !!a.needs_clarify,
               narrative: a.narrative || next.content || "",
@@ -104,6 +105,7 @@ export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoi
             rows: next.payload?.rows || 0,
             cached: !!next.payload?.cached,
             elapsed_ms: 0,
+            smartq: next.payload?.smartq || undefined,
           },
         });
         i += 1;
@@ -156,6 +158,7 @@ export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoi
         trace_id: r.trace_id || "", conversation_id: realCid, question: q,
         answer: r.answer, plan: {} as any, sql: r.sql || "",
         rows: r.rows ?? (r.answer.table?.row_count || 0), cached: false, elapsed_ms: 0,
+        smartq: r.smartq || undefined,
       } as ChatResult;
       // draft → 真实会话：把该轮迁移到后端新建的会话 id，并跟随过去（与普通问数一致）。
       if (ownerCid === DRAFT_KEY && realCid) {
@@ -183,7 +186,7 @@ export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoi
     (qOverride?: string) => {
       const q = (qOverride ?? input).trim();
       if (!q || !user) return;
-      if (isSmartQ) { void submitSmartQ(q); return; }
+      if (smartqContextIds.length === 0 && isSmartQ) { void submitSmartQ(q); return; }
       // 允许同时多个对话流式：以 submit 那一刻的 activeId 为 owner（null → draft）
       const ownerCid = activeId || DRAFT_KEY;
       // 该 owner 是否已经有正在跑的请求？防止用户在同一对话快速连续点
@@ -214,7 +217,8 @@ export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoi
       };
 
       const handle = api.stream(
-        { question: q, conversation_id: activeId, force_refresh: forceRefresh, llm_provider: llmChoice || undefined },
+        { question: q, conversation_id: activeId, force_refresh: forceRefresh, llm_provider: llmChoice || undefined,
+          smartq_cube_ids: smartqContextIds.length ? smartqContextIds : null },
         (evt) => {
           // session 事件：把 draft 迁移到真实 cid（如果当前 owner 是 draft）
           if (evt.stage === "session" && evt.payload?.conversation_id && currentCid === DRAFT_KEY) {
@@ -280,7 +284,7 @@ export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoi
       );
       streamHandles.current[currentCid] = handle;
     },
-    [input, activeId, forceRefresh, user, streamingConvs, updateTurnsForConv, refreshConversations, llmChoice, isSmartQ, submitSmartQ],
+    [input, activeId, forceRefresh, user, streamingConvs, updateTurnsForConv, refreshConversations, llmChoice, isSmartQ, submitSmartQ, smartqContextIds],
   );
 
   const startNew = useCallback(() => {
@@ -352,7 +356,7 @@ export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoi
     streaming, streamingConvs, unread,
     input, setInput,
     forceRefresh, setForceRefresh,
-    smartqDatasets, smartqCube, setSmartqCube, isSmartQ,
+    smartqDatasets, smartqCube, setSmartqCube, isSmartQ, smartqContextIds,
     submit, submitSmartQ, startNew, openConversation, renameConversation, deleteConversation, abort,
     reset,
   };

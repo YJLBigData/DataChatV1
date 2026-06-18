@@ -92,8 +92,11 @@ def test_export_submit_ready_download(client, auth_headers):
     assert dl.headers["content-type"].startswith("application/vnd.openxmlformats")
     assert dl.content[:2] == b"PK"  # xlsx = zip
     # 删除
-    assert client.delete(f"/api/exports/{jid}", headers=auth_headers).json()["ok"] is True
+    deleted = client.delete(f"/api/exports/{jid}", headers=auth_headers).json()
+    assert deleted["ok"] is True and deleted["deleted"] is True and deleted["job_id"] == jid
     assert client.get(f"/api/exports/{jid}", headers=auth_headers).status_code == 404
+    items_after_delete = client.get("/api/exports", headers=auth_headers).json()["items"]
+    assert all(it["id"] != jid for it in items_after_delete)
 
 
 def test_export_rejects_foreign_trace(client, auth_headers):
