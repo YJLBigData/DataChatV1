@@ -1,6 +1,8 @@
 /**
- * 问数页（chat）—— Hero / 历史轮次 / AnswerCard 操作 / SmartQ 数据集条 / Composer / 报告下载弹窗。
- * 状态全部来自 App 级 useChat hook；本组件只负责渲染与"结果卡片上的动作"编排。
+ * 问数页（chat）—— Hero / 历史轮次 / AnswerCard 操作 / Composer / 报告下载弹窗。
+ * 数据范围（飞鹤数据库 / 智能小Q 数据集）统一由顶部「数据范围」入口选择，问数页不再有
+ * 第二处 SmartQ 数据集选择条。状态全部来自 App 级 useChat hook；本组件只负责渲染与
+ * "结果卡片上的动作"编排。
  */
 import { useEffect, useRef, useState } from "react";
 
@@ -25,7 +27,7 @@ interface Props {
 export function ChatPage({ chat, user, suggestions }: Props) {
   const {
     activeId, turns, streaming, input, setInput, forceRefresh, setForceRefresh,
-    isSmartQ, smartqDatasets, smartqCube, setSmartqCube, submit, abort,
+    submit, abort,
   } = chat;
   const [reportFor, setReportFor] = useState<ChatTurn | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -145,33 +147,13 @@ export function ChatPage({ chat, user, suggestions }: Props) {
         )}
       </section>
 
-      {isSmartQ && (
-        <div className="flex flex-wrap items-center gap-2 border-t bg-amber-50/50 px-4 py-2 text-[12px] text-amber-700 sm:px-8 lg:px-20" style={{ borderColor: "#f0e6cf" }}>
-          <span className="font-medium">🧠 智能小Q · 数据集</span>
-          {smartqDatasets.length > 0 ? (
-            <select
-              className="rounded-md border border-amber-200 bg-white px-2 py-1 text-[12px] text-slate-700 outline-none"
-              value={smartqCube}
-              onChange={(e) => setSmartqCube(e.target.value)}
-            >
-              {smartqDatasets.map((d) => (
-                <option key={d.cube_id} value={d.cube_id}>{d.name}{d.theme ? `（${d.theme}）` : ""}</option>
-              ))}
-            </select>
-          ) : (
-            <span className="text-amber-600">暂无授权数据集（或服务未就绪）</span>
-          )}
-          <span className="text-amber-500/80">· 由 Quick BI 智能小Q 直接问数，权限以 Quick BI 为准</span>
-        </div>
-      )}
-
       <Composer
         value={input}
         onChange={setInput}
         onSubmit={() => submit()}
         disabled={streaming}
         loading={streaming}
-        placeholder={isSmartQ ? "用自然语言问 Quick BI，例如：本月各大区销售额" : (turns.length === 0 ? "试试：本月各大区销售额排名" : "继续追问，例如：按城市再下钻 / 看看同比 / 推送给老板")}
+        placeholder={turns.length === 0 ? "试试：本月各大区销售额排名" : "继续追问，例如：按城市再下钻 / 看看同比 / 推送给老板"}
         onAbort={abort}
         forceRefresh={forceRefresh}
         onToggleForceRefresh={setForceRefresh}

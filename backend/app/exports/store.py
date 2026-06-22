@@ -15,6 +15,14 @@ from pathlib import Path
 from typing import Optional
 
 
+class ExportCapacityError(Exception):
+    """事务级容量闸拒绝（每用户/全局在途上限）。service 层据此转成业务拒绝。"""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
 @dataclass
 class ExportJob:
     id: str
@@ -109,6 +117,52 @@ class ExportStore:
                  job.filename, job.path, job.row_count, job.truncated, job.error,
                  job.created_at, job.updated_at, job.expires_at),
             )
+        return job
+
+    def create_if_capacity(self, *, user_id: str, conversation_id: str, trace_id: str, question: str,
+                           filename: str, expires_at: float, per_user_max: int, queue_max: int) -> ExportJob:
+        """**事务级**"检查在途数 + 创建"（审计 P2）：用 BEGIN IMMEDIATE 串行化，杜绝多线程/
+        多 worker 下"先 count 再 create"的竞态超限。超限抛 ExportCapacityError。
+
+        open_tuned 以 isolation_level=None（autocommit）打开连接，故这里用显式事务包住
+        读+写；BEGIN IMMEDIATE 立即取写锁，并发提交会被 busy_timeout 串行化。
+        """
+        now = time.time()
+        job = ExportJob(
+            id="exp_" + uuid.uuid4().hex[:14], user_id=user_id, conversation_id=conversation_id,
+            trace_id=trace_id, question=(question or "")[:500], status="queued",
+            filename=filename, path="", row_count=0, truncated=0, error="",
+            created_at=now, updated_at=now, expires_at=expires_at,
+        )
+        with self._lock:
+            c = self._conn()
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                urow = c.execute(
+                    "SELECT COUNT(*) AS n FROM export_job_v1 WHERE user_id=? AND status IN ('queued','running')",
+                    (user_id,),
+                ).fetchone()
+                if int(urow["n"] if urow else 0) >= per_user_max:
+                    raise ExportCapacityError("您有较多导出任务在排队/生成中，请等其完成后再导出。")
+                grow = c.execute(
+                    "SELECT COUNT(*) AS n FROM export_job_v1 WHERE status IN ('queued','running')"
+                ).fetchone()
+                if int(grow["n"] if grow else 0) >= queue_max:
+                    raise ExportCapacityError("当前导出任务较多，请稍后再试。")
+                c.execute(
+                    "INSERT INTO export_job_v1(id,user_id,conversation_id,trace_id,question,status,filename,path,"
+                    "row_count,truncated,error,created_at,updated_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (job.id, job.user_id, job.conversation_id, job.trace_id, job.question, job.status,
+                     job.filename, job.path, job.row_count, job.truncated, job.error,
+                     job.created_at, job.updated_at, job.expires_at),
+                )
+                c.execute("COMMIT")
+            except BaseException:
+                try:
+                    c.execute("ROLLBACK")
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
         return job
 
     def update(self, job_id: str, **fields) -> None:

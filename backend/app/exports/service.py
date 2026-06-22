@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional
 
-from .store import ExportJob, get_export_store
+from .store import ExportCapacityError, ExportJob, get_export_store
 
 logger = logging.getLogger("datachat.exports")
 
@@ -82,20 +82,20 @@ class ExportService:
 
     def submit(self, *, user_id: str, conversation_id: str, trace_id: str, trusted: dict[str, Any]) -> ExportJob:
         store = get_export_store()
-        # 背压：每用户 / 全局在途上限（计数来自共享 SQLite，多 worker 一致）。
-        if store.count_active_for_user(user_id) >= _per_user_max():
-            raise ExportRejected("您有较多导出任务在排队/生成中，请等其完成后再导出。")
-        if store.count_active() >= _queue_max():
-            raise ExportRejected("当前导出任务较多，请稍后再试。")
-
         question = str(trusted.get("question") or "导出")
         ts = time.strftime("%Y%m%d_%H%M%S")
         # 下载用文件名（人类友好，可重复）；物理文件名稍后按 job id 唯一命名。
         download_name = f"datachat_export_{ts}.xlsx"
-        job = store.create(
-            user_id=user_id, conversation_id=conversation_id, trace_id=trace_id,
-            question=question, filename=download_name, expires_at=time.time() + _ttl(),
-        )
+        # 背压（审计 P2）：每用户/全局在途上限的"检查 + 创建"在**单个事务**内完成，
+        # 多线程/多 worker 都不会竞态超限（旧实现先 count 再 create 有 TOCTOU 漏洞）。
+        try:
+            job = store.create_if_capacity(
+                user_id=user_id, conversation_id=conversation_id, trace_id=trace_id,
+                question=question, filename=download_name, expires_at=time.time() + _ttl(),
+                per_user_max=_per_user_max(), queue_max=_queue_max(),
+            )
+        except ExportCapacityError as exc:
+            raise ExportRejected(exc.message) from exc
         # trusted 在提交线程里已取好（含归属校验），直接带进后台线程，避免再查会话
         self._pool.submit(self._run, job.id, trusted)
         return job
@@ -104,12 +104,25 @@ class ExportService:
 
     def _run(self, job_id: str, trusted: dict[str, Any]) -> None:
         store = get_export_store()
+        # 取消（=删除 job）可能发生在排队期间：开跑前先检查，已取消则直接退出 ——
+        # 不标 running、不取数、不写文件（审计 P2：已删除的排队任务不得继续执行）。
+        if self._is_cancelled(job_id):
+            logger.info("[export %s] cancelled before start", job_id)
+            return
         store.update(job_id, status="running", row_count=0)
         # 物理路径按 job id 唯一命名 —— 同一秒提交的多个 job 各自独立文件，绝不互相覆盖。
         path = _out_dir() / f"{job_id}.xlsx"
         cap = _max_rows()
         try:
+            # 标 running 后、真正取数前再查一次（取消可能恰好发生在这中间）。
+            if self._is_cancelled(job_id):
+                logger.info("[export %s] cancelled right after running mark", job_id)
+                return
             columns, rows_iter = _row_source(trusted, cap=cap)
+            # 取数后、开写文件前最后一道取消检查（写循环内仍会周期性复检）。
+            if self._is_cancelled(job_id):
+                logger.info("[export %s] cancelled before writing file", job_id)
+                return
             written, truncated = _write_xlsx(
                 path, columns, rows_iter, cap=cap,
                 on_progress=lambda n: self._progress(job_id, n),

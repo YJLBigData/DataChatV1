@@ -25,6 +25,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 DATASET_LIST_PATH = "/openapi/v2/smartq/query/llmCubeWithThemeList"
 QUERY_PATH = "/openapi/v2/smartq/queryByQuestion"
+# 官方 QueryDatasetSmartqStatus：返回某数据集是否已开启智能小Q（布尔 Result）。
+DATASET_STATUS_PATH = "/openapi/v2/dataset/smartq/status"
 
 
 class SmartQError(Exception):
@@ -59,6 +61,15 @@ def _as_list(v: Any) -> list[Any]:
 
 def _safe_str(v: Any) -> str:
     return "" if v is None else str(v)
+
+
+def _coerce_bool(v: Any) -> bool:
+    """把网关五花八门的布尔表示（true/1/"open"/"enabled"…）归一成 Python bool。"""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    return str(v or "").strip().lower() in ("1", "true", "yes", "on", "enabled", "open", "y")
 
 
 class SmartQClient:
@@ -210,9 +221,23 @@ class SmartQClient:
         result = self.query_multi_datasets(question=user_question, cube_ids=ids, user_id=user_id)
         return result.get("answer") or {}
 
-    def dataset_status(self, *, cube_id: str) -> dict[str, Any]:
-        """状态/权限接口不作为主流程依赖；保留兼容，避免无权限时阻断问数。"""
-        return {"cube_id": cube_id, "enabled": True, "unchecked": True}
+    def dataset_status(self, *, cube_id: str, user_id: str | None = None) -> dict[str, Any]:
+        """查询某数据集是否已开启智能小Q（官方 QueryDatasetSmartqStatus，返回布尔 Result）。
+
+        审计 P1：必须接入真实状态接口，不再永远返回 enabled=True。接口异常 → 抛 SmartQError，
+        由路由层转成 ok:false，前端据此明确区分"未开启 / 无权限 / 接口异常"。
+        """
+        cid = (cube_id or "").strip()
+        if not cid:
+            raise SmartQError("请提供数据集 ID。")
+        uid = user_id or resolve_smartq_user_id(self.cfg)
+        payload = self._request("GET", DATASET_STATUS_PATH, params={"cubeId": cid, "userId": uid})
+        result = _first(payload, "data", "Data", "result", "Result", "status", "enabled", default=None)
+        if isinstance(result, dict):
+            # 兼容 {"enabled": true} / {"status": 1} / {"smartqStatus": "open"} 等包裹形态
+            result = _first(result, "enabled", "status", "smartqStatus", "open", "Result", default=result)
+        enabled = _coerce_bool(result)
+        return {"cube_id": cid, "enabled": enabled, "unchecked": False}
 
     # ------------------------------------------------------------------ 传输层
 

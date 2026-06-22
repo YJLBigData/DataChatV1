@@ -68,8 +68,9 @@ def smartq_dataset_status(cube_id: str, user: User = Depends(require_user)) -> d
     cfg = load_smartq_config()
     if not cfg.ready:
         return {"ok": False, "error": "智能小Q未启用或未配置完整。"}
+    uid = resolve_smartq_user_id(cfg, fallback=user.email or user.username)
     try:
-        return {"ok": True, **SmartQClient(cfg).dataset_status(cube_id=cube_id)}
+        return {"ok": True, **SmartQClient(cfg).dataset_status(cube_id=cube_id, user_id=uid)}
     except SmartQError as exc:
         return {"ok": False, "error": exc.message}
     except Exception as exc:  # noqa: BLE001
@@ -109,20 +110,24 @@ def execute_smartq_query(*, user: User, question: str, cube_ids: list[str],
     uid = resolve_smartq_user_id(cfg, fallback=user.email or user.username)
     client = SmartQClient(cfg)
 
-    dataset_names: dict[str, str] = {}
+    # 授权校验 **fail-closed**（审计 P0）：数据集列表是授权事实源。拿不到列表、列表为空、
+    # 或请求的 cube 不在授权集合内，一律拒绝查询 —— 绝不相信前端传入的 cube_id，绝不在
+    # "授权未知"时放行（宁可错杀，不可越权）。
     try:
         datasets = client.get_dataset_list(user_id=uid)
-        authorized = {d["cube_id"] for d in datasets}
-        dataset_names = {d["cube_id"]: d.get("name") or d["cube_id"] for d in datasets}
-        if authorized:
-            denied = [cid for cid in cube_ids if cid not in authorized]
-            if denied:
-                return {"ok": False, "error": "无权访问该数据集，或数据集不存在。"}
     except SmartQError as exc:
-        # 数据集列表接口是主能力之一，但查询本身仍由 Quick BI 权限兜底。
         logger.warning("smartq dataset authorization list unavailable: %s", exc.message)
+        return {"ok": False, "error": "无法校验数据集权限，请稍后再试或联系管理员。"}
     except Exception as exc:  # noqa: BLE001
-        logger.warning("smartq cube authorization check skipped: %s", exc)
+        logger.exception("smartq dataset authorization check failed: %s", exc)
+        return {"ok": False, "error": "无法校验数据集权限，请稍后再试或联系管理员。"}
+    authorized = {d["cube_id"] for d in datasets if d.get("cube_id")}
+    dataset_names = {d["cube_id"]: (d.get("name") or d["cube_id"]) for d in datasets if d.get("cube_id")}
+    if not authorized:
+        return {"ok": False, "error": "当前账号没有可用的智能小Q数据集授权，请联系管理员开通。"}
+    denied = [cid for cid in cube_ids if cid not in authorized]
+    if denied:
+        return {"ok": False, "error": "无权访问该数据集，或数据集不存在。"}
 
     try:
         result = client.query_multi_datasets(

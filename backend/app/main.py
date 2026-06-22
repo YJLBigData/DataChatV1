@@ -167,12 +167,35 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
         # 取代已弃用的 @app.on_event("startup")
+        # —— 容量调优（P0-1/P0-2）——
+        # SSE 问数经 run_in_executor(None) 落到事件循环**默认线程池**，其默认大小约
+        # min(32, CPU+4)（4 核机仅 ~8），高峰会排队。这里显式放大，并把 anyio 线程限额
+        # （同步端点 /api/chat 走的池）对齐，让两条问数路径并发能力一致。
+        _pool_size = max(8, int(_os.environ.get("CHAT_THREAD_POOL_SIZE", "32") or "32"))
+        _anyio_limit = max(8, int(_os.environ.get("ANYIO_THREAD_LIMIT", "32") or "32"))
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            asyncio.get_running_loop().set_default_executor(
+                ThreadPoolExecutor(max_workers=_pool_size, thread_name_prefix="chat")
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("set default executor failed: %s", exc)
+        try:
+            import anyio.to_thread
+            anyio.to_thread.current_default_thread_limiter().total_tokens = _anyio_limit
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("set anyio thread limit failed: %s", exc)
         try:
             get_pipe()
             get_auth_store()
             get_query_log_store()
             get_permissions_store()
-            logger.info("DataChat startup ok")
+            from app.core.concurrency import get_chat_guard
+            _guard = get_chat_guard()  # 预热并发闸 + 注册自定义 Prometheus 指标
+            logger.info(
+                "DataChat startup ok (chat_pool=%s, anyio=%s, chat_max_inflight=%s)",
+                _pool_size, _anyio_limit, _guard.max_inflight,
+            )
         except Exception as exc:
             logger.exception("startup failed: %s", exc)
         yield
@@ -591,8 +614,16 @@ def create_app() -> FastAPI:
     @_chat_limit("30/minute")
     def api_chat(request: Request, req: ChatRequest = Body(...), user: User = Depends(require_user)) -> dict[str, Any]:
         from app.core.llm.router import set_request_provider
-        set_request_provider(req.llm_provider)
-        return _do_chat(get_pipe(), get_conversation_store(), user, req, on_event=None)
+        from app.core.concurrency import get_chat_guard
+        # 全局在途并发闸（P0-3）：满了短暂等待后 429 泄洪，避免高峰堆到 LLM 超时。
+        guard = get_chat_guard()
+        if not guard.try_acquire():
+            raise HTTPException(status_code=429, detail="当前问数服务繁忙，请稍后重试。")
+        try:
+            set_request_provider(req.llm_provider)
+            return _do_chat(get_pipe(), get_conversation_store(), user, req, on_event=None)
+        finally:
+            guard.release()
 
     @app.post("/api/chat/stream")
     @_chat_limit("30/minute")
@@ -614,44 +645,60 @@ def create_app() -> FastAPI:
             if not sess or sess.user_id != user.id:
                 raise HTTPException(status_code=404, detail="conversation not found")
 
-        queue: asyncio.Queue = asyncio.Queue()
-        loop = asyncio.get_running_loop()
+        # 全局在途并发闸（P0-3）：鉴权/会话校验通过后再占名额（404 不消耗名额）。
+        # 异步端点用非阻塞获取（timeout=0），绝不阻塞事件循环；满了立即 429 泄洪。
+        from app.core.concurrency import get_chat_guard
+        guard = get_chat_guard()
+        if not guard.try_acquire(timeout=0.0):
+            raise HTTPException(status_code=429, detail="当前问数服务繁忙，请稍后重试。")
 
-        def on_event(evt) -> None:
-            try:
-                loop.call_soon_threadsafe(queue.put_nowait, ("event", evt))
-            except Exception:
-                pass
+        try:
+            queue: asyncio.Queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
 
-        # ContextVar 默认在主线程设置后**不会**穿透到 run_in_executor 的工作线程；
-        # 这里改成在 worker 内显式 set，保证 pipeline → planner → answerer → llm.chat
-        # 整条调用栈都能看到本次请求选的 provider。
-        from app.core.llm.router import set_request_provider as _set_provider
-        chosen_provider = req.llm_provider  # capture before worker runs (avoid req lifetime issues)
+            def on_event(evt) -> None:
+                try:
+                    loop.call_soon_threadsafe(queue.put_nowait, ("event", evt))
+                except Exception:
+                    pass
 
-        def worker() -> None:
-            try:
-                _set_provider(chosen_provider)
-                payload = _do_chat(pipe, store, user, req, on_event=on_event)
-                loop.call_soon_threadsafe(queue.put_nowait, ("done", payload))
-            except Exception as exc:
-                loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
+            # ContextVar 默认在主线程设置后**不会**穿透到 run_in_executor 的工作线程；
+            # 这里改成在 worker 内显式 set，保证 pipeline → planner → answerer → llm.chat
+            # 整条调用栈都能看到本次请求选的 provider。
+            from app.core.llm.router import set_request_provider as _set_provider
+            chosen_provider = req.llm_provider  # capture before worker runs (avoid req lifetime issues)
 
-        loop.run_in_executor(None, worker)
+            def worker() -> None:
+                try:
+                    _set_provider(chosen_provider)
+                    payload = _do_chat(pipe, store, user, req, on_event=on_event)
+                    loop.call_soon_threadsafe(queue.put_nowait, ("done", payload))
+                except Exception as exc:
+                    loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
+
+            loop.run_in_executor(None, worker)
+        except BaseException:
+            # 名额已占但还没把所有权交给 gen()（极少见，如 run_in_executor 失败）→ 立即归还。
+            guard.release()
+            raise
 
         async def gen() -> AsyncGenerator[str, None]:
-            if session_id:
-                yield to_sse_event(_simple_event("session", "ok", {"conversation_id": session_id}))
-            while True:
-                kind, payload = await queue.get()
-                if kind == "event":
-                    yield to_sse_event(payload)
-                elif kind == "done":
-                    yield to_sse_done(payload)
-                    break
-                elif kind == "error":
-                    yield to_sse_error(str(payload))
-                    break
+            try:
+                if session_id:
+                    yield to_sse_event(_simple_event("session", "ok", {"conversation_id": session_id}))
+                while True:
+                    kind, payload = await queue.get()
+                    if kind == "event":
+                        yield to_sse_event(payload)
+                    elif kind == "done":
+                        yield to_sse_done(payload)
+                        break
+                    elif kind == "error":
+                        yield to_sse_error(str(payload))
+                        break
+            finally:
+                # gen() 被消费完 / 客户端断开 / 异常，都会走到这里 → 归还在途名额。
+                guard.release()
 
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -751,19 +798,16 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
     import uuid as _uuid
     trace_id = _uuid.uuid4().hex
     try:
+        # 1) 既有会话归属校验（此刻**不创建**任何会话）。
         session_id = req.conversation_id
-        if not session_id:
-            session = store.create_session(user.id, title=_short_title(req.question))
-            session_id = session.id
-        else:
+        existing_session = bool(session_id)
+        if session_id:
             sess = store.get_session(session_id)
             if not sess or sess.user_id != user.id:
                 # 不暴露 "conversation not found"，给统一友好提示
                 return friendly_error("INPUT_INVALID", trace_id=trace_id, extra="会话不存在或无权访问")
-        if on_event:
-            on_event(_simple_event("session", "ok", {"conversation_id": session_id}))
 
-        # 校验输入
+        # 2) 输入校验**前置**（审计 P1）：校验未过绝不建会话，杜绝"失败留下无消息空会话"。
         question = (req.question or "").strip()
         if not question:
             return friendly_error("INPUT_INVALID", trace_id=trace_id, extra="问题不能为空")
@@ -773,6 +817,8 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
         smartq_cube_ids = [str(c).strip() for c in (getattr(req, "smartq_cube_ids", []) or []) if str(c or "").strip()]
         smartq_cube_ids = list(dict.fromkeys(smartq_cube_ids))
         if smartq_cube_ids:
+            # SmartQ 分支（审计 P1）：会话由 execute_smartq_query 在**成功落库**时创建。
+            # 这里绝不预建会话 —— SmartQ 未配置 / 越权 / 查询失败都不会留下空会话。
             if on_event:
                 on_event(_simple_event("smartq", "start", {"cube_count": len(smartq_cube_ids)}))
             started = datetime.utcnow()
@@ -782,7 +828,7 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
                     user=user,
                     question=question,
                     cube_ids=smartq_cube_ids,
-                    conversation_id=session_id,
+                    conversation_id=session_id or None,
                     persist=True,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -795,7 +841,7 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
                 try:
                     get_query_log_store().record(
                         trace_id=trace_id, user_id=user.id, username=user.username,
-                        conversation_id=session_id, question=question,
+                        conversation_id=session_id or "", question=question,
                         plan={"source": "smartq", "cube_ids": smartq_cube_ids},
                         sql="", rows=0, elapsed_ms=0, cached=False,
                         needs_clarify=False, error=err,
@@ -803,6 +849,11 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
                 except Exception:
                     pass
                 return friendly_error("CHAT_FAILED", trace_id=trace_id, extra=err[:80])
+            # 成功：execute_smartq_query 已落库，拿到真实 conversation_id。
+            real_cid = str(payload.get("conversation_id") or session_id or "")
+            # 新会话场景补发 session 事件，让前端把 draft 迁移到真实会话（与普通问数对齐）。
+            if on_event and not existing_session and real_cid:
+                on_event(_simple_event("session", "ok", {"conversation_id": real_cid}))
             answer = normalize_chat_result(payload.get("answer"))
             sql_str = str(payload.get("sql") or "")
             rows = int(payload.get("rows") or 0)
@@ -816,7 +867,7 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
             try:
                 get_query_log_store().record(
                     trace_id=str(payload.get("trace_id") or trace_id), user_id=user.id, username=user.username,
-                    conversation_id=session_id, question=question,
+                    conversation_id=real_cid, question=question,
                     plan={"source": "smartq", "mode": (payload.get("smartq") or {}).get("mode"), "cube_ids": smartq_cube_ids},
                     sql=sql_str, rows=rows, elapsed_ms=elapsed_ms, cached=False,
                     needs_clarify=False, error="",
@@ -826,7 +877,7 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
             return {
                 "ok": True,
                 "trace_id": payload.get("trace_id") or trace_id,
-                "conversation_id": payload.get("conversation_id") or session_id,
+                "conversation_id": real_cid,
                 "question": question,
                 "answer": answer,
                 "plan": {},
@@ -836,6 +887,13 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
                 "elapsed_ms": elapsed_ms,
                 "smartq": payload.get("smartq") or {},
             }
+
+        # 3) 普通问数：到这里（输入校验全过）才创建会话，并补发 session 事件。
+        if not session_id:
+            session = store.create_session(user.id, title=_short_title(question))
+            session_id = session.id
+        if on_event:
+            on_event(_simple_event("session", "ok", {"conversation_id": session_id}))
 
         history = store.history_for_llm(session_id, limit=4)
         prev_plan: Optional[QueryPlan] = None

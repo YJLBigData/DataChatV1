@@ -66,6 +66,9 @@ export default function App() {
   const chat = useChat({ enabled: !!user, user, llmChoice, smartqCubeIds });
   const expert = useExpertTeam(!!user, { smartqCubeIds });
 
+  /** 数据范围仅在「新建对话」（当前窗口尚无消息）时可切换；对话一旦开始即锁定。 */
+  const scopeLocked = (page === "expert" ? expert.turns.length : chat.turns.length) > 0;
+
   /* ----------------------------- 401 handling ------------------------------ */
   const chatReset = chat.reset;
   useEffect(() => {
@@ -238,6 +241,7 @@ export default function App() {
             <div className="flex items-center gap-3">
               <SmartQDatasetButton
                 selectedIds={smartqCubeIds}
+                locked={scopeLocked}
                 onChange={(ids, datasets) => { setSmartqCubeIds(ids); setSmartqPickedDatasets(datasets); }}
               />
               {headerHealth}

@@ -382,6 +382,12 @@ class LLMRouter:
                 return resp
             except (httpx.TimeoutException, httpx.HTTPError, LLMError) as exc:
                 last_exc = exc
+                if isinstance(exc, httpx.TimeoutException):
+                    try:
+                        from app.core.concurrency import note_llm_timeout
+                        note_llm_timeout()
+                    except Exception:
+                        pass
                 if attempt >= attempts:
                     break
                 wait = min(2 ** attempt, 4)

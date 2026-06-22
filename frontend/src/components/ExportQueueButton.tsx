@@ -95,18 +95,27 @@ export function ExportQueueButton() {
 
   const remove = useCallback(async (id: string) => {
     const before = jobs;
-    setJobs((arr) => arr.filter((j) => j.id !== id));
+    setJobs((arr) => arr.filter((j) => j.id !== id));  // 乐观移除
     try {
       const res = await api.deleteExport(id);
       if (res && res.ok === false) {
+        // 后端明确拒绝（极少见）→ 回滚并提示
         setJobs(before);
-        toast.error("删除失败");
+        toast.error("删除失败，请稍后重试");
         return;
       }
-      await refresh();
+      await refresh();  // 与服务端对齐
     } catch {
-      setJobs(before);
-      toast.error("删除失败");
+      // 网络抖动 / 旧后端对已不存在的 job 返回 404 等：以服务端真实状态为准——
+      // 重新拉列表，若该 job 已不在则视为删除成功（不弹错误），否则才回滚报错。
+      try {
+        const items = (await api.listExports()).items || [];
+        setJobs(items);
+        if (items.some((j) => j.id === id)) toast.error("删除失败，请稍后重试");
+      } catch {
+        setJobs(before);
+        toast.error("删除失败，请稍后重试");
+      }
     }
   }, [jobs, refresh]);
 

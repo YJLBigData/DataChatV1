@@ -139,6 +139,12 @@ class FeiheGatewayClient:
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, httpx.TimeoutException):
+                try:
+                    from app.core.concurrency import note_llm_timeout
+                    note_llm_timeout()
+                except Exception:
+                    pass
             raise FeiheGatewayError(f"飞鹤网关请求失败：{exc}")
         d = (data or {}).get("data") or {}
         content = d.get("chatResponseContent")

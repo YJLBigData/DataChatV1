@@ -1,0 +1,42 @@
+[Unit]
+# DataChatV1 问数服务 —— 容量方案 P0-7：进程守护 + 崩溃自愈 + 开机自启。
+# 安装：sudo cp deploy/systemd/datachatv1.service /etc/systemd/system/
+#       sudo systemctl daemon-reload && sudo systemctl enable --now datachatv1
+Description=DataChatV1 问数服务 (FastAPI/Uvicorn)
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+# 按服务器实际部署用户调整（仓库记忆：服务部署在 /opt/datachatv1）。
+User=root
+Group=root
+WorkingDirectory=/opt/datachatv1/backend
+
+# 真实密钥与环境覆盖（DB_HOST/DB_PASSWORD/AES_KEY/JWT_SECRET/APP_ENV=production…）。
+# 非敏感容量参数走 backend/config/env/production.env（APP_ENV=production 时被 config.py 自动加载）。
+EnvironmentFile=/opt/datachatv1/.env
+
+# 固定单 worker：专家团后台编排的进度(events)/取消是**进程内**状态，多 worker 会割裂；
+# 问数为 I/O 等待型，单 worker + 放大的线程池(CHAT_THREAD_POOL_SIZE=32)足以支撑 30 人并发。
+# venv 路径按实际调整（仓库本地为 backend/.venv）。
+ExecStart=/opt/datachatv1/backend/.venv/bin/python -m uvicorn app.main:app \
+    --host 127.0.0.1 --port 8001 --log-level info \
+    --workers 1 \
+    --proxy-headers --forwarded-allow-ips '*' \
+    --timeout-keep-alive 30
+
+Restart=always
+RestartSec=2
+TimeoutStopSec=30
+KillSignal=SIGTERM
+LimitNOFILE=65535
+
+# 内存兜底（8GB 机器，防失控进程拖垮整机 + 打爆 swap）。
+# 注意：CentOS7 的 systemd(219) 用 MemoryLimit；systemd>=231 用 MemoryMax=5G。
+# 正常单 worker 远不会触及 5G；触发即被 cgroup 杀掉，由 Restart=always 拉起。
+MemoryAccounting=yes
+MemoryLimit=5G
+
+[Install]
+WantedBy=multi-user.target

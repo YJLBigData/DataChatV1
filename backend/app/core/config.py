@@ -43,6 +43,15 @@ def _coalesce_env(*names: str, default: str = "") -> str:
     return default
 
 
+def _env_int(name: str, default: int) -> int:
+    """读 int 型环境变量；缺失/非法时回退默认值（绝不让坏配置炸启动）。"""
+    raw = _coalesce_env(name, default=str(default))
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class MySQLConfig:
     host: str = "127.0.0.1"
@@ -51,7 +60,11 @@ class MySQLConfig:
     password: str = ""
     database: str = "chatbi"
     charset: str = "utf8mb4"
+    # 连接池：运行期数值由 load_config() 按容量目标(30人并发)从 env 注入，
+    # 这里只放保守的库级默认（直接 new MySQLConfig() 的少数测试路径用）。
     pool_size: int = 5
+    max_overflow: int = 10
+    pool_timeout: int = 30
     pool_recycle: int = 3600
     statement_timeout_ms: int = 15000
 
@@ -72,10 +85,10 @@ class LLMConfig:
     bailian_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     bailian_chat_model: str = "qwen3.6-max-preview"
     bailian_embed_model: str = "text-embedding-v3"
-    # qwen3.6-max-preview is a reasoning model — single call can take 50-90s
-    # under default settings. 180s gives us headroom; we also disable retries
-    # so a slow call doesn't snowball into N×60s.
-    timeout_seconds: int = 180
+    # 读超时：生产走飞鹤网关，目标 90s（容量方案 P0-5；env LLM_READ_TIMEOUT 可覆盖）。
+    # 收紧到 90s 是为了避免高峰期单个慢调用长时间钉住线程池线程；若上线后发现
+    # 推理模型(如 qwen3.6-max)正常调用就常 >90s，再用 LLM_READ_TIMEOUT 调回 120~180。
+    timeout_seconds: int = 90
     connect_timeout_seconds: int = 10
     chat_temperature: float = 0.0
     max_tokens: int = 1500
@@ -223,6 +236,18 @@ def load_config(reload: bool = False) -> V1Config:
 
     cfg.cache.redis_url = os.environ.get("DATACHAT_REDIS_URL", cfg.cache.redis_url)
     cfg.cache.enabled = os.environ.get("DATACHAT_CACHE_ENABLED", "1") not in ("0", "false", "False")
+
+    # —— 容量调优：DB 连接池（P0-4）。匹配 ~30 并发在途问数；上限 = pool_size+max_overflow。
+    #    应用侧最大连接必须 ≤ 业务库为本应用分配的配额（向 DBA 申请 ≥60，应用侧 35）。
+    cfg.mysql.pool_size = _env_int("DB_POOL_SIZE", 20)
+    cfg.mysql.max_overflow = _env_int("DB_MAX_OVERFLOW", 15)
+    cfg.mysql.pool_timeout = _env_int("DB_POOL_TIMEOUT", 10)
+    cfg.mysql.pool_recycle = _env_int("DB_POOL_RECYCLE", 1800)
+
+    # —— 容量调优：LLM 超时/重试（P0-5）。读超时收紧到 90s，连接 10s，重试 1 次。
+    cfg.llm.timeout_seconds = _env_int("LLM_READ_TIMEOUT", cfg.llm.timeout_seconds)
+    cfg.llm.connect_timeout_seconds = _env_int("LLM_CONNECT_TIMEOUT", cfg.llm.connect_timeout_seconds)
+    cfg.llm.max_retries = _env_int("LLM_MAX_RETRIES", cfg.llm.max_retries)
 
     settings_path = _backend_root() / "config" / "settings.yaml"
     if settings_path.exists():

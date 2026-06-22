@@ -86,9 +86,19 @@ def download_export(job_id: str, user: User = Depends(require_user)):
 
 @router.delete("/{job_id}")
 def delete_export(job_id: str, user: User = Depends(require_user)) -> dict[str, Any]:
+    """删除/取消我的导出 job（连带删文件）。
+
+    **幂等**：job 不存在（已被轮询清理 / 过期回收 / 另一个 worker 删过 / 重复点击）一律
+    返回成功，绝不报"删除失败"——删除的目标状态（该 job 已不在）已经达成。仅当 job 仍
+    存在但**不属于当前用户**时才 404（既防越权、又不泄露他人 job 的存在性）。
+    """
     store = get_export_store()
     job = store.get(job_id)
-    if not job or job.user_id != user.id:
+    if job is None:
+        # 已经不存在 → 幂等成功（前端据此把它从列表移除，不弹错误）。
+        logger.info("delete export job=%s user=%s already-gone (idempotent ok)", job_id, user.id)
+        return {"ok": True, "deleted": False, "job_id": job_id, "file_deleted": False, "already_gone": True}
+    if job.user_id != user.id:
         raise HTTPException(status_code=404, detail="导出任务不存在")
     file_deleted = False
     try:
@@ -99,4 +109,4 @@ def delete_export(job_id: str, user: User = Depends(require_user)) -> dict[str, 
         logger.warning("delete export file failed job=%s user=%s path=%s: %s", job_id, user.id, job.path, exc)
     deleted = store.delete(job_id)
     logger.info("delete export job=%s user=%s deleted=%s file_deleted=%s", job_id, user.id, deleted, file_deleted)
-    return {"ok": deleted, "deleted": deleted, "job_id": job_id, "file_deleted": file_deleted}
+    return {"ok": True, "deleted": deleted, "job_id": job_id, "file_deleted": file_deleted}

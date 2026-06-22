@@ -2,15 +2,17 @@
  * 问数页的会话 + 流式状态容器（与 useExpertTeam 对称）。
  *
  * 把原先散在 App.tsx 里的 chat 状态机整体抽到这里：会话列表、每会话 turns、并发流式、
- * 红点、draft→真实会话迁移、SmartQ 非流式问数、打开/新建/改名/删除/终止。
+ * 红点、draft→真实会话迁移、打开/新建/改名/删除/终止。
+ * 数据范围（飞鹤数据库 / 智能小Q 数据集）统一走顶部「数据范围」入口：App 把选中的
+ * smartqCubeIds 传进来，submit 时带上 smartq_cube_ids 走同一条 /api/chat/stream，
+ * SmartQ 与普通问数共享流式/落库/导出/报告/反馈链路（不再有第二条 provider 直连路径）。
  * App 只负责把它接到侧栏会话列表与 ChatPage 两处渲染。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
-import { api, friendlyError } from "../api";
-import { toast } from "../shared/toast";
+import { api } from "../api";
 import { useConversations } from "./useConversations";
-import type { AuthUser, ChatResult, ChatTurn } from "../types";
+import type { AuthUser, ChatTurn } from "../types";
 
 const DRAFT_KEY = "__draft__";
 
@@ -33,11 +35,6 @@ export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoi
   const streamHandles = useRef<Record<string, { close: () => void }>>({});
   const [input, setInput] = useState("");
   const [forceRefresh, setForceRefresh] = useState(false);
-  /* SmartQ（Quick BI 智能小Q）问数模式 */
-  const [smartqDatasets, setSmartqDatasets] = useState<{ cube_id: string; name: string; theme: string }[]>([]);
-  const [smartqCube, setSmartqCube] = useState<string>("");
-
-  const isSmartQ = llmChoice === "smartq";
 
   const turns = useMemo(() => {
     const key = activeId || DRAFT_KEY;
@@ -116,77 +113,10 @@ export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoi
     return out;
   }, []);
 
-  // SmartQ 选中时拉取该用户被授权的数据集（服务端按身份解析，前端只选范围）。
-  useEffect(() => {
-    if (!isSmartQ || !user) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const r = await api.smartqDatasets();
-        if (cancelled) return;
-        setSmartqDatasets(r.items || []);
-        if (r.items?.length) setSmartqCube((cur) => cur || r.items[0].cube_id);
-        if (!r.ok && r.error) toast.error(r.error);
-      } catch (e: any) {
-        if (!cancelled) toast.error(friendlyError(e));
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [isSmartQ, user]);
-
-  // SmartQ 问数：走 /api/smartq/query（非流式）。结果由后端落库到问数会话并返回
-  // 可信 (conversation_id, trace_id) —— 与普通问数共享导出/报告/飞书/反馈链路。
-  const submitSmartQ = useCallback(async (q: string) => {
-    const ownerCid = activeId || DRAFT_KEY;
-    const turnId = uuid();
-    updateTurnsForConv(ownerCid, (arr) => [...arr, { id: turnId, question: q, pending: true, events: [] }]);
-    setInput("");
-    try {
-      const r = await api.smartqQuery({
-        question: q,
-        cube_id: smartqCube || undefined,
-        conversation_id: activeId || undefined,
-      });
-      if (!r.ok || !r.answer) {
-        const err = r.error || "智能小Q查询失败";
-        updateTurnsForConv(ownerCid, (arr) => arr.map((t) => (t.id === turnId ? { ...t, pending: false, error: err } : t)));
-        toast.error(err);
-        return;
-      }
-      const realCid = r.conversation_id || (ownerCid === DRAFT_KEY ? "" : ownerCid);
-      const result = {
-        trace_id: r.trace_id || "", conversation_id: realCid, question: q,
-        answer: r.answer, plan: {} as any, sql: r.sql || "",
-        rows: r.rows ?? (r.answer.table?.row_count || 0), cached: false, elapsed_ms: 0,
-        smartq: r.smartq || undefined,
-      } as ChatResult;
-      // draft → 真实会话：把该轮迁移到后端新建的会话 id，并跟随过去（与普通问数一致）。
-      if (ownerCid === DRAFT_KEY && realCid) {
-        setTurnsByConv((prev) => {
-          const next = { ...prev };
-          const draftArr = next[DRAFT_KEY] || [];
-          const moving = draftArr.filter((t) => t.id === turnId).map((t) => ({ ...t, pending: false, result }));
-          const remain = draftArr.filter((t) => t.id !== turnId);
-          if (remain.length) next[DRAFT_KEY] = remain; else delete next[DRAFT_KEY];
-          next[realCid] = [...(next[realCid] || []), ...moving];
-          return next;
-        });
-        setActiveId((cur) => (cur === null ? realCid : cur));
-      } else {
-        updateTurnsForConv(ownerCid, (arr) => arr.map((t) => (t.id === turnId ? { ...t, pending: false, result } : t)));
-      }
-      refreshConversations();
-    } catch (e: any) {
-      updateTurnsForConv(ownerCid, (arr) => arr.map((t) => (t.id === turnId ? { ...t, pending: false, error: friendlyError(e) } : t)));
-      toast.error(friendlyError(e));
-    }
-  }, [activeId, smartqCube, updateTurnsForConv, refreshConversations]);
-
   const submit = useCallback(
     (qOverride?: string) => {
       const q = (qOverride ?? input).trim();
       if (!q || !user) return;
-      if (smartqContextIds.length === 0 && isSmartQ) { void submitSmartQ(q); return; }
       // 允许同时多个对话流式：以 submit 那一刻的 activeId 为 owner（null → draft）
       const ownerCid = activeId || DRAFT_KEY;
       // 该 owner 是否已经有正在跑的请求？防止用户在同一对话快速连续点
@@ -284,7 +214,7 @@ export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoi
       );
       streamHandles.current[currentCid] = handle;
     },
-    [input, activeId, forceRefresh, user, streamingConvs, updateTurnsForConv, refreshConversations, llmChoice, isSmartQ, submitSmartQ, smartqContextIds],
+    [input, activeId, forceRefresh, user, streamingConvs, updateTurnsForConv, refreshConversations, llmChoice, smartqContextIds],
   );
 
   const startNew = useCallback(() => {
@@ -356,8 +286,8 @@ export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoi
     streaming, streamingConvs, unread,
     input, setInput,
     forceRefresh, setForceRefresh,
-    smartqDatasets, smartqCube, setSmartqCube, isSmartQ, smartqContextIds,
-    submit, submitSmartQ, startNew, openConversation, renameConversation, deleteConversation, abort,
+    smartqContextIds,
+    submit, startNew, openConversation, renameConversation, deleteConversation, abort,
     reset,
   };
 }

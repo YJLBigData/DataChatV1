@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import TimeoutError as SAPoolTimeout
 
 from app.core.config import V1Config, load_config
 
@@ -43,6 +44,8 @@ class MySQLExecutor:
         self.engine: Engine = create_engine(
             self.cfg.mysql.sqlalchemy_url,
             pool_size=self.cfg.mysql.pool_size,
+            max_overflow=self.cfg.mysql.max_overflow,
+            pool_timeout=self.cfg.mysql.pool_timeout,
             pool_recycle=self.cfg.mysql.pool_recycle,
             pool_pre_ping=True,
             future=True,
@@ -112,6 +115,14 @@ class MySQLExecutor:
                     rows.append([_normalize_value(v) for v in row])
                     if len(rows) >= max_rows:
                         break
+        except SAPoolTimeout as exc:
+            # 连接池在 pool_timeout 内拿不到连接 → 高峰 DB 背压信号，计数供监控/扩容判据。
+            try:
+                from app.core.concurrency import note_db_pool_timeout
+                note_db_pool_timeout()
+            except Exception:
+                pass
+            raise ExecError(f"数据库连接池繁忙（获取连接超时）：{exc}") from exc
         except DBAPIError as exc:
             raise ExecError(f"SQL execution failed: {exc.orig if hasattr(exc, 'orig') else exc}") from exc
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -151,6 +162,15 @@ class MySQLExecutor:
                             break
                         yield [_normalize_value(v) for v in row]
                         sent += 1
+            except SAPoolTimeout as exc:
+                # 流式导出同样要分类连接池超时（审计 P2）：计数供监控/扩容判据 +
+                # 给可读错误，而不是混进通用 SQL 失败。
+                try:
+                    from app.core.concurrency import note_db_pool_timeout
+                    note_db_pool_timeout()
+                except Exception:
+                    pass
+                raise ExecError(f"数据库连接池繁忙（获取连接超时）：{exc}") from exc
             except DBAPIError as exc:
                 raise ExecError(f"SQL execution failed: {exc.orig if hasattr(exc, 'orig') else exc}") from exc
 
