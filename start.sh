@@ -335,10 +335,15 @@ elif ! "$PYBIN" -m pip check >/dev/null 2>&1; then
   gray "  · pip check 发现依赖不一致，将修复依赖"
 fi
 if [ "$NEED_INSTALL" = "1" ]; then
-  gray "  安装/更新 backend/requirements.txt …"
-  "$PYBIN" -m pip install --upgrade pip >/dev/null
-  "$PYBIN" -m pip install -r "$REQ_FILE" >/tmp/datachat-pip.log 2>&1 || {
-    red "  pip install 失败，查看 /tmp/datachat-pip.log"; exit 4;
+  # 国内网络直连 PyPI 常在大 wheel（如 playwright 42MB）上反复 Connection timed out 卡死，
+  # 表现为"启动一直停在 安装/更新 依赖"。默认走可覆盖的国内镜像 + 显式超时/重试，避免空挂。
+  # 覆盖方式：export PIP_INDEX_URL=<你的源>（留空走默认清华源）、PIP_TIMEOUT、PIP_RETRIES。
+  PIP_MIRROR="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+  PIP_NET=(-i "$PIP_MIRROR" --timeout "${PIP_TIMEOUT:-60}" --retries "${PIP_RETRIES:-5}")
+  gray "  安装/更新 backend/requirements.txt …（镜像：$PIP_MIRROR，超时${PIP_TIMEOUT:-60}s/重试${PIP_RETRIES:-5}）"
+  "$PYBIN" -m pip install "${PIP_NET[@]}" --upgrade pip >/dev/null 2>&1 || true
+  "$PYBIN" -m pip install "${PIP_NET[@]}" -r "$REQ_FILE" >/tmp/datachat-pip.log 2>&1 || {
+    red "  pip install 失败，查看 /tmp/datachat-pip.log（如为网络超时，可换源：export PIP_INDEX_URL=…）"; exit 4;
   }
   # 装完再 pip check 一次，确保真的对齐后才写哈希戳（戳=安装成功且自洽的凭证）。
   "$PYBIN" -m pip check >/tmp/datachat-pipcheck.log 2>&1 || {

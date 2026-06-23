@@ -164,7 +164,7 @@ export function useExpertTeam(enabled: boolean, opts: { smartqCubeIds?: string[]
         expert_ids: opts.expert_ids && opts.expert_ids.length ? opts.expert_ids : null,
         want_report: !!opts.want_report,
         llm_provider: opts.llm_provider ?? undefined,
-        smartq_cube_ids: smartqContextIds.length ? smartqContextIds : null,
+        smartq_cube_ids: smartqContextIds.length ? smartqContextIds : [],
         conversation_id: activeIdRef.current,
       });
       if (!r.ok || !r.job_id || !r.conversation_id) {
