@@ -1,0 +1,452 @@
+{
+  "summary": [
+    {
+      "指标": "代码变更文件",
+      "结果": "11个已跟踪文件变更 + 1个新增测试 + 1个新前端构建产物"
+    },
+    {
+      "指标": "后端正式测试",
+      "结果": "193 passed, 7 skipped"
+    },
+    {
+      "指标": "前端构建",
+      "结果": "PASS"
+    },
+    {
+      "指标": "API冒烟",
+      "结果": "37 passed, 0 failed"
+    },
+    {
+      "指标": "Excel样例问数",
+      "结果": "26轮：13 FAIL, 2 WARN, 11 PASS"
+    },
+    {
+      "指标": "最高风险",
+      "结果": "智能问数 SQL 口径错误会以 ok=true 展示给用户"
+    }
+  ],
+  "code_issues": [
+    {
+      "优先级": "P0",
+      "模块": "智能问数准确性",
+      "位置": "backend/app/core/nl2sql/planner.py / compiler.py / semantic.yaml",
+      "问题": "样例中差异、转新率、鹤礼3.0复购、门店明细、有导/非导等核心口径被错译，ok=true 掩盖业务错误。",
+      "证据": "26轮样例问数HTTP全成功，但13轮判定FAIL；正例SQL均可在本地MySQL执行。",
+      "建议": "增加业务口径回归集；planner必须支持衍生指标、ratio排序、TopN、上下文集合保持；compiler增加差异/占比/HAVING率表达式单测。"
+    },
+    {
+      "优先级": "P0",
+      "模块": "SSE并发/取消",
+      "位置": "backend/app/main.py:697-743",
+      "问题": "SSE客户端断开时 gen() finally 释放并发闸，但 run_in_executor 中的问数 worker 不会取消，后台LLM/DB仍继续跑。大量用户取消可能绕过 in-flight 限制。",
+      "证据": "worker future 未保存，on_event 仍向 queue 写；guard.release() 绑定到 stream 消费结束而非 worker 真实结束。",
+      "建议": "保存 Future/取消标记；guard 释放应以 worker 终态为准，或断开时显式通知 pipeline 停止。"
+    },
+    {
+      "优先级": "P1",
+      "模块": "测试基础设施",
+      "位置": "backend/app/core/llm/test_runner.py:20,65,92",
+      "问题": "业务工具函数以 test_ 命名，被 pytest 全量收集成测试，导致 `pytest` 无参数失败。",
+      "证据": "全量 pytest：194 passed, 7 skipped, 2 errors；错误为 fixture api_key/provider not found。",
+      "建议": "文件改名 llm_probe.py，函数改名 probe_bailian/probe_feihe，或加 __test__ = False；CI只跑 backend/tests 不是根治。"
+    },
+    {
+      "优先级": "P1",
+      "模块": "依赖安装",
+      "位置": "start.sh:315-319 + backend/requirements.txt",
+      "问题": "启动脚本只抽样 import fastapi/sqlglot/redis/bcrypt/jwt，requirements新增依赖不会触发安装；本地实际缺少 playwright。",
+      "证据": "backend/requirements.txt 声明 playwright，但 `backend/.venv/bin/python -c import playwright` 失败。",
+      "建议": "按 requirements hash 或 pip check 决定安装；每次 requirements.txt 变更自动 pip install -r。"
+    },
+    {
+      "优先级": "P1",
+      "模块": "时间口径",
+      "位置": "backend/config/semantic.yaml:10-16 + 运行库数据",
+      "问题": "semantic 声称销售数据到2026-05，但本地 summary/target/member/potential 最大为2026-04；“本月”查询生成2026-05并返回0行。",
+      "证据": "本地查询 max_ym=2026-04，前台“本月各大区销售额排名”返回0行，SQL year=2026 month=05。",
+      "建议": "启动时校验语义层 data_range 与真实表；相对时间按表级 max partition 或给用户明确“最新可用月份”。"
+    },
+    {
+      "优先级": "P2",
+      "模块": "项目结构",
+      "位置": "backend/app/main.py:1-1100, backend/app/core/nl2sql/planner.py:1-1249, backend/app/core/orchestrator.py:1-717",
+      "问题": "入口、编排、规划器文件过大，路由、SSE、语义管理、会话落库和问数逻辑耦合，不利于企业级维护和审计。",
+      "证据": "main.py 1100行，planner.py 1249行，orchestrator.py 717行。",
+      "建议": "拆分 chat router、sse service、conversation service、semantic admin service；planner按 time/metric/dimension/context/ranking 分模块。"
+    },
+    {
+      "优先级": "P2",
+      "模块": "前端错误展示",
+      "位置": "frontend/src/api/http.ts:37-53",
+      "问题": "pickServerMessage 直接展示 body.error，可能把中间件或下游英文/技术错误原样暴露给业务用户。",
+      "证据": "新增兜底读取 body.error；SmartQ/slowapi错误体可能混有内部信息。",
+      "建议": "仅对白名单错误码转中文；未知 error 进入日志和 trace，前台显示统一友好文案。"
+    },
+    {
+      "优先级": "P2",
+      "模块": "移动端体验",
+      "位置": "frontend 页面整体",
+      "问题": "移动端可见但管理表格横向密度高，字段和操作按钮挤在一屏，后续配置项增多会影响可用性。",
+      "证据": "Playwright 390x844 截图 ui_mobile.png，LLM设置表格完整但拥挤。",
+      "建议": "管理页移动端改为卡片/抽屉详情，表格只保留关键列。"
+    }
+  ],
+  "functional_tests": [
+    {
+      "类别": "后端自动化",
+      "用例": "新增/相关回归测试",
+      "结果": "PASS",
+      "证据": "tests/test_chat_robustness_0622b.py + tests/test_smartq_http.py: 11 passed"
+    },
+    {
+      "类别": "后端自动化",
+      "用例": "正式测试目录 backend/tests",
+      "结果": "PASS",
+      "证据": "193 passed, 7 skipped"
+    },
+    {
+      "类别": "后端自动化",
+      "用例": "无参数全量 pytest",
+      "结果": "FAIL",
+      "证据": "app/core/llm/test_runner.py 被误收集，2 errors"
+    },
+    {
+      "类别": "前端构建",
+      "用例": "npm run build",
+      "结果": "PASS",
+      "证据": "vite build 成功，产物 index-B9dt6ceN.js"
+    },
+    {
+      "类别": "接口冒烟",
+      "用例": "登录、会话、文件夹、SmartQ、专家团、导出、反馈、后台管理",
+      "结果": "PASS",
+      "证据": "37/37 API用例通过"
+    },
+    {
+      "类别": "前台点击",
+      "用例": "登录、数据范围、SmartQ数据集、问数、结果按钮、专家团、日志/权限/用户/LLM、移动端",
+      "结果": "PASS_WITH_FINDINGS",
+      "证据": "截图 output/playwright/*.png；前台问数返回0行暴露时间口径问题"
+    },
+    {
+      "类别": "样例问数",
+      "用例": "Excel 12条样例，26轮问答",
+      "结果": "FAIL",
+      "证据": "HTTP 26/26 ok=true，但业务判定 PASS/WARN/FAIL = 11/2/13"
+    }
+  ],
+  "question_rows": [
+    {
+      "编号": 1,
+      "轮次": 1,
+      "问题": "2025年1月各大区门店销售金额、门店销售目标和销售达成率分别是多少？按达成率从低到高排序。",
+      "判定": "PASS",
+      "返回行数": 8,
+      "主要问题/说明": "SQL口径、时间、维度和追问上下文基本符合样例要求。",
+      "实际SQL": "SELECT `lev2_name` AS `region`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`,\n       SUM(shop_sale_amount) AS `shop_sale_amount_actual_total`,\n       SUM(shop_sale_target) AS `shop_sale_target_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `shop_sale_achievement_rate` ASC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "大区, 门店销售达成率, 门店销售实绩（目标表口径）, 门店销售目标",
+      "截图": "output/playwright/ui_chat_result.png"
+    },
+    {
+      "编号": 1,
+      "轮次": 2,
+      "问题": "只看东一区，拆到省区层级。",
+      "判定": "PASS",
+      "返回行数": 2,
+      "主要问题/说明": "SQL口径、时间、维度和追问上下文基本符合样例要求。",
+      "实际SQL": "SELECT `lev3_name` AS `sub_region`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`,\n       SUM(shop_sale_amount) AS `shop_sale_amount_actual_total`,\n       SUM(shop_sale_target) AS `shop_sale_target_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev3_name`\nORDER BY `shop_sale_achievement_rate` ASC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "省区, 门店销售达成率, 门店销售实绩（目标表口径）, 门店销售目标",
+      "截图": ""
+    },
+    {
+      "编号": 2,
+      "轮次": 1,
+      "问题": "2025年1月各大区过单金额、过单目标和过单达成率是多少？",
+      "判定": "WARN",
+      "返回行数": 8,
+      "主要问题/说明": "主指标正确，但额外返回了门店销售达成率，且默认排序可能和“是多少”的中性问法不完全一致。",
+      "实际SQL": "SELECT `lev2_name` AS `region`,\n       SUM(gd_amount) / NULLIF(SUM(gd_target), 0) AS `gd_achievement_rate`,\n       SUM(gd_amount) AS `gd_amount_actual_total`,\n       SUM(gd_target) AS `gd_target_total`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `gd_achievement_rate` DESC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "大区, 过单达成率, 过单实绩（目标表口径）, 过单目标, 门店销售达成率",
+      "截图": ""
+    },
+    {
+      "编号": 2,
+      "轮次": 2,
+      "问题": "把东一区按渠道拆开看。",
+      "判定": "WARN",
+      "返回行数": 9,
+      "主要问题/说明": "主指标正确，但额外返回了门店销售达成率，且默认排序可能和“是多少”的中性问法不完全一致。",
+      "实际SQL": "SELECT `big_system_channel_name` AS `big_system_channel`,\n       SUM(gd_amount) / NULLIF(SUM(gd_target), 0) AS `gd_achievement_rate`,\n       SUM(gd_amount) AS `gd_amount_actual_total`,\n       SUM(gd_target) AS `gd_target_total`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `big_system_channel_name`\nORDER BY `gd_achievement_rate` DESC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "大系统渠道, 过单达成率, 过单实绩（目标表口径）, 过单目标, 门店销售达成率",
+      "截图": ""
+    },
+    {
+      "编号": 3,
+      "轮次": 1,
+      "问题": "2025年1月各大区终端销售金额和还原过单金额差异是多少？差异金额最大的前10个大区列出来。",
+      "判定": "FAIL",
+      "返回行数": 8,
+      "主要问题/说明": "差异金额未计算，SQL只返回两个指标并按还原过单金额排序，不是按差异最大排序。",
+      "实际SQL": "SELECT `lev2_name` AS `region`,\n       SUM(reduction_gd_sale_amount) AS `reduction_gd_sale_amount_total`,\n       SUM(terminal_sale_amount) AS `terminal_sale_amount_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `reduction_gd_sale_amount_total` DESC\nLIMIT 10",
+      "正例SQL/建议SQL": "SELECT lev2_name AS region,\n       SUM(terminal_sale_amount) AS terminal_sale_amount_total,\n       SUM(reduction_gd_sale_amount) AS reduction_gd_sale_amount_total,\n       SUM(terminal_sale_amount) - SUM(reduction_gd_sale_amount) AS diff_amount,\n       ABS(SUM(terminal_sale_amount) - SUM(reduction_gd_sale_amount)) AS diff_abs\nFROM chatbi.ads_bi_month_shop_item_dan_summary_df\nWHERE year='2025' AND month='01'\nGROUP BY lev2_name\nORDER BY diff_abs DESC\nLIMIT 10",
+      "返回字段": "大区, 还原过单金额（不含货补）, 终端销售额",
+      "截图": ""
+    },
+    {
+      "编号": 3,
+      "轮次": 2,
+      "问题": "继续下钻到省区。",
+      "判定": "FAIL",
+      "返回行数": 10,
+      "主要问题/说明": "追问“继续下钻到省区”应延续差异口径，实际仍未计算差异，只按还原过单金额排序。",
+      "实际SQL": "SELECT `lev2_name` AS `region`,\n       `lev3_name` AS `sub_region`,\n       SUM(reduction_gd_sale_amount) AS `reduction_gd_sale_amount_total`,\n       SUM(terminal_sale_amount) AS `terminal_sale_amount_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`, `lev3_name`\nORDER BY `reduction_gd_sale_amount_total` DESC\nLIMIT 10",
+      "正例SQL/建议SQL": "SELECT lev2_name AS region, lev3_name AS sub_region,\n       SUM(terminal_sale_amount) AS terminal_sale_amount_total,\n       SUM(reduction_gd_sale_amount) AS reduction_gd_sale_amount_total,\n       SUM(terminal_sale_amount) - SUM(reduction_gd_sale_amount) AS diff_amount,\n       ABS(SUM(terminal_sale_amount) - SUM(reduction_gd_sale_amount)) AS diff_abs\nFROM chatbi.ads_bi_month_shop_item_dan_summary_df\nWHERE year='2025' AND month='01'\nGROUP BY lev2_name, lev3_name\nORDER BY diff_abs DESC\nLIMIT 10",
+      "返回字段": "大区, 省区, 还原过单金额（不含货补）, 终端销售额",
+      "截图": ""
+    },
+    {
+      "编号": 4,
+      "轮次": 1,
+      "问题": "2025年1月东一区各产品系列的终端销售金额占比是多少？",
+      "判定": "PASS",
+      "返回行数": 9,
+      "主要问题/说明": "SQL口径、时间、维度和追问上下文基本符合样例要求。",
+      "实际SQL": "SELECT `item_series_new_name` AS `item_series`,\n       SUM(terminal_sale_amount) AS `terminal_sale_amount_total`,\n       SUM(terminal_sale_amount) / NULLIF(SUM(SUM(terminal_sale_amount)) OVER (), 0) AS `terminal_sale_amount_total_ratio`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `item_series_new_name`\nORDER BY `terminal_sale_amount_total` DESC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "产品系列, 终端销售额, 终端销售额 占比",
+      "截图": ""
+    },
+    {
+      "编号": 4,
+      "轮次": 2,
+      "问题": "只看3段。",
+      "判定": "PASS",
+      "返回行数": 7,
+      "主要问题/说明": "SQL口径、时间、维度和追问上下文基本符合样例要求。",
+      "实际SQL": "SELECT `item_series_new_name` AS `item_series`,\n       SUM(terminal_sale_amount) AS `terminal_sale_amount_total`,\n       SUM(terminal_sale_amount) / NULLIF(SUM(SUM(terminal_sale_amount)) OVER (), 0) AS `terminal_sale_amount_total_ratio`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `item_dan_name` = '3段'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `item_series_new_name`\nORDER BY `terminal_sale_amount_total` DESC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "产品系列, 终端销售额, 终端销售额 占比",
+      "截图": ""
+    },
+    {
+      "编号": 5,
+      "轮次": 1,
+      "问题": "2025年1月各段位的终端销售金额和销售占比是多少？",
+      "判定": "PASS",
+      "返回行数": 6,
+      "主要问题/说明": "SQL口径、时间、维度和追问上下文基本符合样例要求。",
+      "实际SQL": "SELECT `item_dan_name` AS `item_dan`,\n       SUM(terminal_sale_amount) AS `terminal_sale_amount_total`,\n       SUM(terminal_sale_amount) / NULLIF(SUM(SUM(terminal_sale_amount)) OVER (), 0) AS `terminal_sale_amount_total_ratio`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `item_dan_name`\nORDER BY `terminal_sale_amount_total` DESC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "段位, 终端销售额, 终端销售额 占比",
+      "截图": ""
+    },
+    {
+      "编号": 5,
+      "轮次": 2,
+      "问题": "按大区拆开看。",
+      "判定": "PASS",
+      "返回行数": 48,
+      "主要问题/说明": "SQL口径、时间、维度和追问上下文基本符合样例要求。",
+      "实际SQL": "SELECT `item_dan_name` AS `item_dan`,\n       `lev2_name` AS `region`,\n       SUM(terminal_sale_amount) AS `terminal_sale_amount_total`,\n       SUM(terminal_sale_amount) / NULLIF(SUM(SUM(terminal_sale_amount)) OVER (), 0) AS `terminal_sale_amount_total_ratio`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `item_dan_name`, `lev2_name`\nORDER BY `terminal_sale_amount_total` DESC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "段位, 大区, 终端销售额, 终端销售额 占比",
+      "截图": ""
+    },
+    {
+      "编号": 6,
+      "轮次": 1,
+      "问题": "2025年1月各大区首购人数、60天复购人数和60天复购率是多少？按复购率从高到低排序。",
+      "判定": "PASS",
+      "返回行数": 8,
+      "主要问题/说明": "SQL口径、时间、维度和追问上下文基本符合样例要求。",
+      "实际SQL": "SELECT `lev2_name` AS `region`,\n       SUM(repurchase_in_60_days_num) / NULLIF(SUM(first_purchase_num), 0) AS `repurchase_rate_60d`,\n       SUM(repurchase_in_60_days_num) AS `repurchase_in_60_days_num_total`,\n       SUM(first_purchase_num) AS `first_purchase_num_total`\nFROM `chatbi`.`ads_member_first_purchase_new_customer_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `repurchase_rate_60d` DESC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "大区, 60天复购率, 60天复购人数, 首购人数",
+      "截图": ""
+    },
+    {
+      "编号": 6,
+      "轮次": 2,
+      "问题": "只看1段、2段、3段分别是多少。",
+      "判定": "FAIL",
+      "返回行数": 8,
+      "主要问题/说明": "追问“1段、2段、3段分别”只筛选了 item_dan_name=1段，漏掉2段、3段，也没有把段位作为输出维度。",
+      "实际SQL": "SELECT `lev2_name` AS `region`,\n       SUM(repurchase_in_60_days_num) / NULLIF(SUM(first_purchase_num), 0) AS `repurchase_rate_60d`,\n       SUM(repurchase_in_60_days_num) AS `repurchase_in_60_days_num_total`,\n       SUM(first_purchase_num) AS `first_purchase_num_total`\nFROM `chatbi`.`ads_member_first_purchase_new_customer_total_df`\nWHERE `item_dan_name` = '1段'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `repurchase_rate_60d` DESC\nLIMIT 500",
+      "正例SQL/建议SQL": "SELECT lev2_name AS region, item_dan_name AS item_dan,\n       SUM(first_purchase_num) AS first_purchase_num_total,\n       SUM(repurchase_in_60_days_num) AS repurchase_in_60_days_num_total,\n       SUM(repurchase_in_60_days_num) / NULLIF(SUM(first_purchase_num),0) AS repurchase_rate_60d\nFROM chatbi.ads_member_first_purchase_new_customer_total_df\nWHERE year='2025' AND month='01' AND item_dan_name IN ('1段','2段','3段')\nGROUP BY lev2_name, item_dan_name\nORDER BY lev2_name, item_dan_name\nLIMIT 500",
+      "返回字段": "大区, 60天复购率, 60天复购人数, 首购人数",
+      "截图": ""
+    },
+    {
+      "编号": 7,
+      "轮次": 1,
+      "问题": "2025年1月各渠道鹤礼3.0新客数、鹤礼3.060天复购数和复购率是多少？",
+      "判定": "FAIL",
+      "返回行数": 9,
+      "主要问题/说明": "“鹤礼3.0 60天复购数/率”错用通用 repurchase_in_60_days_num 和 first_purchase_num，应使用 heli30_repurchase_in_60_days_num / heli30_new_customer_num。",
+      "实际SQL": "SELECT `big_system_channel_name` AS `big_system_channel`,\n       SUM(heli30_new_customer_num) AS `heli30_new_customer_num_total`,\n       SUM(repurchase_in_60_days_num) AS `repurchase_in_60_days_num_total`,\n       SUM(first_purchase_num) AS `first_purchase_num_total`,\n       SUM(repurchase_in_60_days_num) / NULLIF(SUM(first_purchase_num), 0) AS `repurchase_rate_60d`\nFROM `chatbi`.`ads_member_first_purchase_new_customer_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `big_system_channel_name`\nORDER BY `heli30_new_customer_num_total` DESC\nLIMIT 500",
+      "正例SQL/建议SQL": "SELECT big_system_channel_name AS big_system_channel,\n       SUM(heli30_new_customer_num) AS heli30_new_customer_num_total,\n       SUM(heli30_repurchase_in_60_days_num) AS heli30_repurchase_60d_total,\n       SUM(heli30_repurchase_in_60_days_num) / NULLIF(SUM(heli30_new_customer_num),0) AS heli30_repurchase_rate_60d\nFROM chatbi.ads_member_first_purchase_new_customer_total_df\nWHERE year='2025' AND month='01'\nGROUP BY big_system_channel_name\nORDER BY heli30_new_customer_num_total DESC\nLIMIT 500",
+      "返回字段": "大系统渠道, 鹤礼3.0新客数, 60天复购人数, 首购人数, 60天复购率",
+      "截图": ""
+    },
+    {
+      "编号": 7,
+      "轮次": 2,
+      "问题": "东一区表现怎么样？",
+      "判定": "FAIL",
+      "返回行数": 9,
+      "主要问题/说明": "东一区追问继承了错误的鹤礼3.0复购口径。",
+      "实际SQL": "SELECT `big_system_channel_name` AS `big_system_channel`,\n       SUM(heli30_new_customer_num) AS `heli30_new_customer_num_total`,\n       SUM(repurchase_in_60_days_num) AS `repurchase_in_60_days_num_total`,\n       SUM(first_purchase_num) AS `first_purchase_num_total`,\n       SUM(repurchase_in_60_days_num) / NULLIF(SUM(first_purchase_num), 0) AS `repurchase_rate_60d`\nFROM `chatbi`.`ads_member_first_purchase_new_customer_total_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `big_system_channel_name`\nORDER BY `heli30_new_customer_num_total` DESC\nLIMIT 500",
+      "正例SQL/建议SQL": "SELECT big_system_channel_name AS big_system_channel,\n       SUM(heli30_new_customer_num) AS heli30_new_customer_num_total,\n       SUM(heli30_repurchase_in_60_days_num) AS heli30_repurchase_60d_total,\n       SUM(heli30_repurchase_in_60_days_num) / NULLIF(SUM(heli30_new_customer_num),0) AS heli30_repurchase_rate_60d\nFROM chatbi.ads_member_first_purchase_new_customer_total_df\nWHERE year='2025' AND month='01' AND lev2_name='东一区'\nGROUP BY big_system_channel_name\nORDER BY heli30_new_customer_num_total DESC\nLIMIT 500",
+      "返回字段": "大系统渠道, 鹤礼3.0新客数, 60天复购人数, 首购人数, 60天复购率",
+      "截图": ""
+    },
+    {
+      "编号": 8,
+      "轮次": 1,
+      "问题": "2025年1月各大区精准潜客人数、转新人数和转新率是多少？转新率最低的5个大区列出来。",
+      "判定": "FAIL",
+      "返回行数": 8,
+      "主要问题/说明": "要求转新率最低5个大区，实际未计算转新率，按精准潜客人数排序且 LIMIT 500。",
+      "实际SQL": "SELECT `lev2_name` AS `region`,\n       SUM(potential_num) AS `potential_num_total`,\n       SUM(potential_to_new_num) AS `potential_to_new_num_total`\nFROM `chatbi`.`ads_precision_nutrition_potential_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `potential_num_total` DESC\nLIMIT 500",
+      "正例SQL/建议SQL": "SELECT lev2_name AS region,\n       SUM(potential_num) AS potential_num_total,\n       SUM(potential_to_new_num) AS potential_to_new_num_total,\n       SUM(potential_to_new_num) / NULLIF(SUM(potential_num),0) AS potential_to_new_rate\nFROM chatbi.ads_precision_nutrition_potential_total_df\nWHERE year='2025' AND month='01'\nGROUP BY lev2_name\nORDER BY potential_to_new_rate ASC\nLIMIT 5",
+      "返回字段": "大区, 精准潜客人数, 潜客转新客人数",
+      "截图": ""
+    },
+    {
+      "编号": 8,
+      "轮次": 2,
+      "问题": "下钻到省区，并只看东一区。",
+      "判定": "FAIL",
+      "返回行数": 2,
+      "主要问题/说明": "追问到东一区省区层级仍未输出转新率，也未按转新率排序。",
+      "实际SQL": "SELECT `lev3_name` AS `sub_region`,\n       SUM(potential_num) AS `potential_num_total`,\n       SUM(potential_to_new_num) AS `potential_to_new_num_total`\nFROM `chatbi`.`ads_precision_nutrition_potential_total_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev3_name`\nORDER BY `potential_num_total` DESC\nLIMIT 500",
+      "正例SQL/建议SQL": "SELECT lev3_name AS sub_region,\n       SUM(potential_num) AS potential_num_total,\n       SUM(potential_to_new_num) AS potential_to_new_num_total,\n       SUM(potential_to_new_num) / NULLIF(SUM(potential_num),0) AS potential_to_new_rate\nFROM chatbi.ads_precision_nutrition_potential_total_df\nWHERE year='2025' AND month='01' AND lev2_name='东一区'\nGROUP BY lev3_name\nORDER BY potential_to_new_rate ASC\nLIMIT 500",
+      "返回字段": "省区, 精准潜客人数, 潜客转新客人数",
+      "截图": ""
+    },
+    {
+      "编号": 9,
+      "轮次": 1,
+      "问题": "2025年1月东一区销售金额最高的20个门店是哪些？列出门店名称、经销商、城市、导购姓名、销售数量、销售金额和过单金额。",
+      "判定": "FAIL",
+      "返回行数": 1,
+      "主要问题/说明": "要求门店名称、经销商、城市、导购等 Top20 明细，实际只返回全区汇总的销售数量和过单金额，缺少门店维度、销售金额和 LIMIT 20。",
+      "实际SQL": "SELECT SUM(shop_sale_qty) AS `shop_sale_qty_total`,\n       SUM(gd_amount) AS `gd_amount_total`\nFROM `chatbi`.`ads_bi_hs_sale_info_df`\nWHERE `lev2_name` = '东一区'\n  AND `acc_month` IN ('2025-01')\nLIMIT 500",
+      "正例SQL/建议SQL": "SELECT shop_name, dealer_name, official_city AS city, guide_name,\n       SUM(shop_sale_qty) AS shop_sale_qty_total,\n       SUM(shop_sale_amount) AS shop_sale_amount_total,\n       SUM(gd_amount) AS gd_amount_total\nFROM chatbi.ads_bi_hs_sale_info_df\nWHERE acc_month='2025-01' AND lev2_name='东一区'\nGROUP BY shop_name, dealer_name, official_city, guide_name\nORDER BY shop_sale_amount_total DESC\nLIMIT 20",
+      "返回字段": "门店销售件数, 过单金额（明细）",
+      "截图": ""
+    },
+    {
+      "编号": 10,
+      "轮次": 1,
+      "问题": "2025年1月有导门店和非导门店的销售金额、销售数量、过单金额分别是多少？销售金额占比分别是多少？",
+      "判定": "FAIL",
+      "返回行数": 1,
+      "主要问题/说明": "要求有导/非导门店分组及销售金额占比，实际无分组、无销售金额、无占比。",
+      "实际SQL": "SELECT SUM(shop_sale_qty) AS `shop_sale_qty_total`,\n       SUM(gd_amount) AS `gd_amount_total`\nFROM `chatbi`.`ads_bi_hs_sale_info_df`\nWHERE `acc_month` IN ('2025-01')\nLIMIT 500",
+      "正例SQL/建议SQL": "SELECT is_guide_shop,\n       SUM(shop_sale_amount) AS shop_sale_amount_total,\n       SUM(shop_sale_qty) AS shop_sale_qty_total,\n       SUM(gd_amount) AS gd_amount_total,\n       SUM(shop_sale_amount) / NULLIF(SUM(SUM(shop_sale_amount)) OVER (),0) AS shop_sale_amount_ratio\nFROM chatbi.ads_bi_hs_sale_info_df\nWHERE acc_month='2025-01'\nGROUP BY is_guide_shop\nORDER BY shop_sale_amount_total DESC",
+      "返回字段": "门店销售件数, 过单金额（明细）",
+      "截图": ""
+    },
+    {
+      "编号": 11,
+      "轮次": 1,
+      "问题": "2025年1月各大区门店销售金额、门店销售目标和销售达成率是多少？按达成率从低到高排序。",
+      "判定": "PASS",
+      "返回行数": 8,
+      "主要问题/说明": "SQL口径、时间、维度和追问上下文基本符合样例要求。",
+      "实际SQL": "SELECT `lev2_name` AS `region`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`,\n       SUM(shop_sale_amount) AS `shop_sale_amount_actual_total`,\n       SUM(shop_sale_target) AS `shop_sale_target_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `shop_sale_achievement_rate` ASC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "大区, 门店销售达成率, 门店销售实绩（目标表口径）, 门店销售目标",
+      "截图": ""
+    },
+    {
+      "编号": 11,
+      "轮次": 2,
+      "问题": "只看东一区，拆到省区层级。",
+      "判定": "PASS",
+      "返回行数": 2,
+      "主要问题/说明": "SQL口径、时间、维度和追问上下文基本符合样例要求。",
+      "实际SQL": "SELECT `lev3_name` AS `sub_region`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`,\n       SUM(shop_sale_amount) AS `shop_sale_amount_actual_total`,\n       SUM(shop_sale_target) AS `shop_sale_target_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev3_name`\nORDER BY `shop_sale_achievement_rate` ASC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "省区, 门店销售达成率, 门店销售实绩（目标表口径）, 门店销售目标",
+      "截图": ""
+    },
+    {
+      "编号": 11,
+      "轮次": 3,
+      "问题": "继续按大系统渠道拆开看。",
+      "判定": "PASS",
+      "返回行数": 18,
+      "主要问题/说明": "SQL口径、时间、维度和追问上下文基本符合样例要求。",
+      "实际SQL": "SELECT `lev3_name` AS `sub_region`,\n       `big_system_channel_name` AS `big_system_channel`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`,\n       SUM(shop_sale_amount) AS `shop_sale_amount_actual_total`,\n       SUM(shop_sale_target) AS `shop_sale_target_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev3_name`, `big_system_channel_name`\nORDER BY `shop_sale_achievement_rate` ASC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "省区, 大系统渠道, 门店销售达成率, 门店销售实绩（目标表口径）, 门店销售目标",
+      "截图": ""
+    },
+    {
+      "编号": 11,
+      "轮次": 4,
+      "问题": "把达成率低于90%的省区和渠道列出来。",
+      "判定": "PASS",
+      "返回行数": 14,
+      "主要问题/说明": "SQL口径、时间、维度和追问上下文基本符合样例要求。",
+      "实际SQL": "SELECT `lev3_name` AS `sub_region`,\n       `big_system_channel_name` AS `big_system_channel`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`,\n       SUM(shop_sale_amount) AS `shop_sale_amount_actual_total`,\n       SUM(shop_sale_target) AS `shop_sale_target_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev3_name`, `big_system_channel_name`\nHAVING (SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0)) < 0.9\nORDER BY `shop_sale_achievement_rate` ASC\nLIMIT 500",
+      "正例SQL/建议SQL": "",
+      "返回字段": "省区, 大系统渠道, 门店销售达成率, 门店销售实绩（目标表口径）, 门店销售目标",
+      "截图": ""
+    },
+    {
+      "编号": 12,
+      "轮次": 1,
+      "问题": "2025年1月各大区精准潜客人数、转新人数和转新率是多少？按转新率从低到高排序。",
+      "判定": "FAIL",
+      "返回行数": 8,
+      "主要问题/说明": "要求按转新率从低到高，实际未计算转新率，按潜客人数排序。",
+      "实际SQL": "SELECT `lev2_name` AS `region`,\n       SUM(potential_num) AS `potential_num_total`,\n       SUM(potential_to_new_num) AS `potential_to_new_num_total`\nFROM `chatbi`.`ads_precision_nutrition_potential_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `potential_num_total` ASC\nLIMIT 500",
+      "正例SQL/建议SQL": "SELECT lev2_name AS region,\n       SUM(potential_num) AS potential_num_total,\n       SUM(potential_to_new_num) AS potential_to_new_num_total,\n       SUM(potential_to_new_num) / NULLIF(SUM(potential_num),0) AS potential_to_new_rate\nFROM chatbi.ads_precision_nutrition_potential_total_df\nWHERE year='2025' AND month='01'\nGROUP BY lev2_name\nORDER BY potential_to_new_rate ASC\nLIMIT 500",
+      "返回字段": "大区, 精准潜客人数, 潜客转新客人数",
+      "截图": ""
+    },
+    {
+      "编号": 12,
+      "轮次": 2,
+      "问题": "只看转新率最低的3个大区。",
+      "判定": "FAIL",
+      "返回行数": 8,
+      "主要问题/说明": "要求最低3个大区，实际仍返回8个大区且未计算转新率。",
+      "实际SQL": "SELECT `lev2_name` AS `region`,\n       SUM(potential_num) AS `potential_num_total`,\n       SUM(potential_to_new_num) AS `potential_to_new_num_total`\nFROM `chatbi`.`ads_precision_nutrition_potential_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `potential_num_total` ASC\nLIMIT 500",
+      "正例SQL/建议SQL": "SELECT lev2_name AS region,\n       SUM(potential_num) AS potential_num_total,\n       SUM(potential_to_new_num) AS potential_to_new_num_total,\n       SUM(potential_to_new_num) / NULLIF(SUM(potential_num),0) AS potential_to_new_rate\nFROM chatbi.ads_precision_nutrition_potential_total_df\nWHERE year='2025' AND month='01'\nGROUP BY lev2_name\nORDER BY potential_to_new_rate ASC\nLIMIT 3",
+      "返回字段": "大区, 精准潜客人数, 潜客转新客人数",
+      "截图": ""
+    },
+    {
+      "编号": 12,
+      "轮次": 3,
+      "问题": "把这3个大区下钻到省区。",
+      "判定": "FAIL",
+      "返回行数": 16,
+      "主要问题/说明": "“这3个大区”上下文未保留，实际下钻了全部大区省区。",
+      "实际SQL": "SELECT `lev2_name` AS `region`,\n       `lev3_name` AS `sub_region`,\n       SUM(potential_num) AS `potential_num_total`,\n       SUM(potential_to_new_num) AS `potential_to_new_num_total`\nFROM `chatbi`.`ads_precision_nutrition_potential_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`, `lev3_name`\nORDER BY `potential_num_total` ASC\nLIMIT 500",
+      "正例SQL/建议SQL": "SELECT p.lev2_name AS region, p.lev3_name AS sub_region,\n       SUM(p.potential_num) AS potential_num_total,\n       SUM(p.potential_to_new_num) AS potential_to_new_num_total,\n       SUM(p.potential_to_new_num) / NULLIF(SUM(p.potential_num),0) AS potential_to_new_rate\nFROM chatbi.ads_precision_nutrition_potential_total_df p\nJOIN (\n  SELECT lev2_name\n  FROM chatbi.ads_precision_nutrition_potential_total_df\n  WHERE year='2025' AND month='01'\n  GROUP BY lev2_name\n  ORDER BY SUM(potential_to_new_num) / NULLIF(SUM(potential_num),0) ASC\n  LIMIT 3\n) b ON p.lev2_name=b.lev2_name\nWHERE p.year='2025' AND p.month='01'\nGROUP BY p.lev2_name, p.lev3_name\nORDER BY potential_to_new_rate ASC\nLIMIT 500",
+      "返回字段": "大区, 省区, 精准潜客人数, 潜客转新客人数",
+      "截图": ""
+    },
+    {
+      "编号": 12,
+      "轮次": 4,
+      "问题": "再按大系统渠道拆开，找出潜客人数大于50但转新率低于5%的渠道。",
+      "判定": "FAIL",
+      "返回行数": 0,
+      "主要问题/说明": "转新率低于5%被编译成 SUM(potential_num)<5，且未限制在前文最低3个大区；0行结果是错误 SQL 导致。",
+      "实际SQL": "SELECT `lev2_name` AS `region`,\n       `lev3_name` AS `sub_region`,\n       `big_system_channel_name` AS `big_system_channel`,\n       SUM(potential_num) AS `potential_num_total`,\n       SUM(potential_to_new_num) AS `potential_to_new_num_total`\nFROM `chatbi`.`ads_precision_nutrition_potential_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`, `lev3_name`, `big_system_channel_name`\nHAVING (SUM(potential_num)) > 50\n  AND (SUM(potential_num)) < 5\nORDER BY `potential_num_total` ASC\nLIMIT 500",
+      "正例SQL/建议SQL": "SELECT p.lev2_name AS region, p.lev3_name AS sub_region, p.big_system_channel_name AS big_system_channel,\n       SUM(p.potential_num) AS potential_num_total,\n       SUM(p.potential_to_new_num) AS potential_to_new_num_total,\n       SUM(p.potential_to_new_num) / NULLIF(SUM(p.potential_num),0) AS potential_to_new_rate\nFROM chatbi.ads_precision_nutrition_potential_total_df p\nJOIN (\n  SELECT lev2_name\n  FROM chatbi.ads_precision_nutrition_potential_total_df\n  WHERE year='2025' AND month='01'\n  GROUP BY lev2_name\n  ORDER BY SUM(potential_to_new_num) / NULLIF(SUM(potential_num),0) ASC\n  LIMIT 3\n) b ON p.lev2_name=b.lev2_name\nWHERE p.year='2025' AND p.month='01'\nGROUP BY p.lev2_name, p.lev3_name, p.big_system_channel_name\nHAVING SUM(p.potential_num) > 50\n   AND SUM(p.potential_to_new_num) / NULLIF(SUM(p.potential_num),0) < 0.05\nORDER BY potential_to_new_rate ASC\nLIMIT 500",
+      "返回字段": "大区, 省区, 大系统渠道, 精准潜客人数, 潜客转新客人数",
+      "截图": ""
+    }
+  ]
+}

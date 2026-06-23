@@ -220,7 +220,7 @@ export function ExpertPanelPage({ user, llmProvider, expert, smartqDatasets = []
         <div className="mx-auto w-full max-w-3xl">
           <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
             <span>{selected.size ? `已选 ${selected.size} 位专家` : "自动调度"}</span>
-            {smartqDatasets.length ? <span className="text-blue-500">数据反问：{smartqDatasets.map((d) => d.name).join("、")}</span> : null}
+            {smartqDatasets.length ? <span className="text-blue-500">数据范围：{smartqDatasets.map((d) => d.name).join("、")}</span> : null}
             {!empty ? <button type="button" onClick={openCreate} className="text-slate-400 hover:text-blue-500">+ 新建技能</button> : null}
             <label className="ml-auto flex cursor-pointer items-center gap-1 text-slate-500">
               <input type="checkbox" checked={wantReport} onChange={(e) => setWantReport(e.target.checked)} />

@@ -14,7 +14,7 @@ from __future__ import annotations
 import calendar
 import re
 from datetime import date
-from typing import Any
+from typing import Any, Callable
 
 from app.core.semantic import SemanticLayer
 from app.core.semantic.layer import MetricDef, TableDef
@@ -42,10 +42,22 @@ def _qstring(value: str) -> str:
 
 
 class PlanCompiler:
-    def __init__(self, semantic: SemanticLayer, *, default_limit: int = 100, today: date | None = None):
+    def __init__(
+        self,
+        semantic: SemanticLayer,
+        *,
+        default_limit: int = 100,
+        today: date | None = None,
+        latest_month_provider: "Callable[[str], str | None] | None" = None,
+    ):
         self.semantic = semantic
         self.default_limit = default_limit
         self.today = today or date.today()
+        # 相对时间（本月/上月/本年…）解析时优先用**该表的真实最新分区**，而不是
+        # semantic.yaml 里写死的 data_range.latest（审计 P1：YAML 声称到 2026-05，
+        # 但本地核心表只到 2026-04，"本月"生成了 0 行的 2026-05 查询）。provider 取不到
+        # （无 DB / 异常）则安全回退到 semantic.data_range_latest。返回 "YYYY-MM" 或 None。
+        self.latest_month_provider = latest_month_provider
 
     # ------------------------------------------------------------ public
 
@@ -68,6 +80,8 @@ class PlanCompiler:
             return self._compile_mom(plan, metric_def, table_def)
         if plan.calculation == "ratio":
             return self._compile_ratio(plan, metric_def, table_def)
+        if plan.calculation == "delta":
+            return self._compile_delta(plan, metric_def, table_def)
         return self._compile_basic(plan, metric_def, table_def)
 
     # ------------------------------------------------------------- basic
@@ -119,11 +133,22 @@ class PlanCompiler:
 
         sub = metric.expression
         select_parts.append(f"{sub} AS `{metric.name}`")
-        select_parts.append(f"{sub} / NULLIF(SUM({sub}) OVER (), 0) AS `{metric.name}_ratio`")
         meta["columns"][metric.name] = {
             "kind": "metric", "label": metric.label, "unit": metric.unit,
             "format": metric.display_format, "decimals": metric.decimals,
         }
+        # 附带指标也要 SELECT 出来：用户问"有导/非导的销售金额、销售数量、过单金额…销售金额占比"
+        # 时，占比只对主指标算，但其余指标必须一并返回，否则答非所问（审计 case 10）。
+        for extra in plan.extra_metrics:
+            ed = self.semantic.metric(extra)
+            if not ed or ed.table != table.name or ed.name == metric.name:
+                continue
+            select_parts.append(f"{ed.expression} AS `{ed.name}`")
+            meta["columns"][ed.name] = {
+                "kind": "metric", "label": ed.label, "unit": ed.unit,
+                "format": ed.display_format, "decimals": ed.decimals,
+            }
+        select_parts.append(f"{sub} / NULLIF(SUM({sub}) OVER (), 0) AS `{metric.name}_ratio`")
         meta["columns"][f"{metric.name}_ratio"] = {
             "kind": "metric", "label": f"{metric.label} 占比", "unit": "%",
             "format": "percent", "decimals": 2,
@@ -133,6 +158,78 @@ class PlanCompiler:
         having = self._build_having(plan, table)
         order_clause = f"`{metric.name}` DESC"
         sql = self._assemble_sql(select_parts, table, where, group_cols, order_clause, plan.limit or self.default_limit, having=having)
+        return sql, meta
+
+    # ------------------------------------------------------------ delta (difference of two metrics)
+
+    def _compile_delta(self, plan: QueryPlan, metric: MetricDef, table: TableDef) -> tuple[str, dict[str, Any]]:
+        """两个指标的差值。"各大区终端销售额和还原过单金额差异，差异最大的前10"（审计 case 3）。
+
+        需要恰好两个同表指标（主指标 + 第一个附带指标）。除两列原值外，额外输出：
+          - diff_amount = 主指标 - 附带指标（带符号，业务可读"谁多谁少"）
+          - diff_abs    = ABS(主指标 - 附带指标)（用于"差异最大/最小"排序）
+        默认按 diff_abs DESC（差异最大在前）；planner 若显式给了 diff_amount/diff_abs 的
+        升降序（如"差异最小"）则尊重。指标不足两个时安全退化为普通聚合，绝不报错。
+        """
+        extras_on_table = [
+            m for m in plan.extra_metrics
+            if self.semantic.metric(m) and self.semantic.metric(m).table == table.name  # type: ignore[union-attr]
+            and m != metric.name
+        ]
+        if not extras_on_table:
+            return self._compile_basic(plan, metric, table)
+        other = self.semantic.metric(extras_on_table[0])
+        assert other is not None
+
+        select_parts: list[str] = []
+        meta: dict[str, Any] = {"columns": {}, "metric": metric.name, "table": table.full_name, "calculation": "delta"}
+        group_cols = self._group_columns(plan, table, meta, select_parts)
+
+        select_parts.append(f"{metric.expression} AS `{metric.name}`")
+        select_parts.append(f"{other.expression} AS `{other.name}`")
+        meta["columns"][metric.name] = {
+            "kind": "metric", "label": metric.label, "unit": metric.unit,
+            "format": metric.display_format, "decimals": metric.decimals,
+        }
+        meta["columns"][other.name] = {
+            "kind": "metric", "label": other.label, "unit": other.unit,
+            "format": other.display_format, "decimals": other.decimals,
+        }
+        # 其余附带指标（>2 个时）也带上，保持"问到的都返回"
+        for extra in extras_on_table[1:]:
+            ed = self.semantic.metric(extra)
+            if not ed:
+                continue
+            select_parts.append(f"{ed.expression} AS `{ed.name}`")
+            meta["columns"][ed.name] = {
+                "kind": "metric", "label": ed.label, "unit": ed.unit,
+                "format": ed.display_format, "decimals": ed.decimals,
+            }
+
+        diff_expr = f"{metric.expression} - {other.expression}"
+        select_parts.append(f"{diff_expr} AS `diff_amount`")
+        select_parts.append(f"ABS({diff_expr}) AS `diff_abs`")
+        meta["columns"]["diff_amount"] = {
+            "kind": "metric", "label": f"{metric.label}与{other.label}差值",
+            "unit": metric.unit, "format": metric.display_format, "decimals": metric.decimals,
+        }
+        meta["columns"]["diff_abs"] = {
+            "kind": "metric", "label": "差值绝对值",
+            "unit": metric.unit, "format": metric.display_format, "decimals": metric.decimals,
+        }
+
+        # 排序：默认 diff_abs DESC；尊重 planner 在 diff_amount/diff_abs 上显式给的方向。
+        order_clause = "`diff_abs` DESC"
+        for o in plan.order_by:
+            if o.field in ("diff_abs", "diff_amount"):
+                direction = "ASC" if (o.dir or "desc").lower() == "asc" else "DESC"
+                order_clause = f"`{o.field}` {direction}"
+                break
+
+        where = self._build_where(plan, table)
+        having = self._build_having(plan, table)
+        limit = plan.limit or (self.default_limit if plan.group_by else 0)
+        sql = self._assemble_sql(select_parts, table, where, group_cols, order_clause, limit, having=having)
         return sql, meta
 
     # ----------------------------------------------------------- yoy_growth
@@ -351,8 +448,19 @@ class PlanCompiler:
             return [f"{col} LIKE {_qstring(year + '-%')}"]
         return []
 
+    def _table_latest(self, table: TableDef) -> str:
+        """该表的最新可用月份 YYYY-MM：优先 provider（真实分区），回退 semantic.data_range，
+        再回退 today。任何异常都不冒泡，保证编译永不因取分区失败而崩。"""
+        latest = ""
+        if self.latest_month_provider is not None:
+            try:
+                latest = self.latest_month_provider(table.name) or ""
+            except Exception:
+                latest = ""
+        return latest or self.semantic.data_range_latest or f"{self.today.year}-{self.today.month:02d}"
+
     def _resolve_period_year_months(self, tr: TimeRange, table: TableDef) -> tuple[str, list[str]]:
-        latest = self.semantic.data_range_latest or f"{self.today.year}-{self.today.month:02d}"
+        latest = self._table_latest(table)
         latest_year, latest_month = (latest.split("-") + ["12"])[:2]
 
         if tr.kind == TimeKind.ABSOLUTE:

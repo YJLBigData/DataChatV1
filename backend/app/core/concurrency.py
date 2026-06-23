@@ -110,6 +110,12 @@ class ChatCapacityGuard:
             return
         CHAT_INFLIGHT.dec()
 
+    @property
+    def in_flight(self) -> int:
+        """当前在途数（= 上限 - 可用名额）。用于监控与并发/取消回归断言。"""
+        # BoundedSemaphore._value 是剩余可用名额；CPython 内部字段，仅做只读观测。
+        return self.max_inflight - getattr(self._sem, "_value", self.max_inflight)
+
 
 _GUARD: ChatCapacityGuard | None = None
 _GUARD_LOCK = threading.Lock()

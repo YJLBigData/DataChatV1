@@ -70,7 +70,7 @@ def api_admin_test_llm_preset_candidate(
     _: User = Depends(require_admin),
 ) -> dict[str, Any]:
     """保存前测试：用候选配置直接发一句问题，必须收到非空回复才返回 ok=True；不写库。"""
-    from app.core.llm.test_runner import test_preset_config, DEFAULT_TEST_PROMPT
+    from app.core.llm.llm_probe import probe_preset_config, DEFAULT_TEST_PROMPT
     from app.core.llm_presets import get_llm_presets_store
     api_key = req.api_key or ""
     # 编辑场景（P1）：未输入新 AK（api_key 为空）但带了 preset_id → 用旧 AK + 草稿字段合并测试，
@@ -79,7 +79,7 @@ def api_admin_test_llm_preset_candidate(
         existing = get_llm_presets_store().get(req.preset_id)
         if existing and existing.provider == "bailian":
             api_key = existing.api_key or ""
-    result = test_preset_config(
+    result = probe_preset_config(
         req.provider,
         api_key=api_key, base_url=req.base_url,
         model=req.model,
@@ -154,11 +154,11 @@ def api_admin_test_existing_llm_preset(
 ) -> dict[str, Any]:
     """对已存的 preset 跑一发测试，把结果写回 last_test_*"""
     from app.core.llm_presets import get_llm_presets_store
-    from app.core.llm.test_runner import test_preset_config
+    from app.core.llm.llm_probe import probe_preset_config
     store = get_llm_presets_store()
     p = store.get(preset_id)
     if not p:
         raise HTTPException(status_code=404, detail="preset 不存在")
-    result = test_preset_config(p.provider, api_key=p.api_key, base_url=p.base_url, model=p.model)
+    result = probe_preset_config(p.provider, api_key=p.api_key, base_url=p.base_url, model=p.model)
     store.record_test(preset_id, bool(result.get("ok")), str(result.get("text") or result.get("error") or ""))
     return result

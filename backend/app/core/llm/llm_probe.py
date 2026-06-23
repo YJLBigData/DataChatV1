@@ -1,7 +1,12 @@
-"""LLM 候选配置「保存前测试」—— 用最小代价问一句"你是什么模型"。
+"""LLM 候选配置「保存前探活」—— 用最小代价问一句"你是什么模型"。
 
 只有真的拿到非空响应才返回 ok=True；超时 / HTTP 非 200 / 空文本 → ok=False。
 **不动 router 单例**，不影响线上正在跑的请求。
+
+历史教训（2026-06-22 审计 P1）：本模块原名 ``test_runner.py``、函数原名 ``test_*``，
+被 pytest 当成测试文件与测试用例收集，无参数全量 ``pytest`` 因缺 fixture 报 2 errors。
+现已更名 ``llm_probe.py`` + ``probe_*`` 业务命名；并加 ``__test__ = False`` 双保险，
+确保任何收集路径都不会把这里的探活函数误当测试。
 """
 from __future__ import annotations
 
@@ -11,15 +16,18 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger("datachat.llm.test")
+logger = logging.getLogger("datachat.llm.probe")
+
+# pytest 双保险：即便文件被某种 glob 命中，也不收集本模块内的任何函数。
+__test__ = False
 
 DEFAULT_TEST_PROMPT = "请用一句话告诉我你是什么模型？"
 DEFAULT_TIMEOUT = 20.0  # 秒；够 qwen-plus 一般 5-10s，长 chain reasoning 不在此用例
 
 
-def test_bailian(*, api_key: str, base_url: str, model: str,
-                 prompt: str = DEFAULT_TEST_PROMPT,
-                 timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
+def probe_bailian(*, api_key: str, base_url: str, model: str,
+                  prompt: str = DEFAULT_TEST_PROMPT,
+                  timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
     """直发一发 bailian/DashScope compatible-mode chat。"""
     if not api_key:
         return {"ok": False, "error": "缺 api_key", "latency_ms": 0, "text": ""}
@@ -62,8 +70,8 @@ def test_bailian(*, api_key: str, base_url: str, model: str,
                 "latency_ms": int((time.perf_counter()-started)*1000), "text": ""}
 
 
-def test_feihe(*, model: str = "", prompt: str = DEFAULT_TEST_PROMPT,
-               timeout: float = DEFAULT_TIMEOUT * 3) -> dict[str, Any]:
+def probe_feihe(*, model: str = "", prompt: str = DEFAULT_TEST_PROMPT,
+                timeout: float = DEFAULT_TIMEOUT * 3) -> dict[str, Any]:
     """飞鹤 Agent 网关 ping。AES_KEY/URL 都在服务器 .env，preset 只决定"调不调"。"""
     try:
         from app.core.llm.feihe_gateway import FeiheGatewayClient, FeiheGatewayError
@@ -89,12 +97,12 @@ def test_feihe(*, model: str = "", prompt: str = DEFAULT_TEST_PROMPT,
                 "latency_ms": int((time.perf_counter()-started)*1000), "text": ""}
 
 
-def test_preset_config(provider: str, *, api_key: str = "", base_url: str = "",
-                       model: str = "", **_ignored) -> dict[str, Any]:
-    """根据 provider 调用对应测试函数。"""
+def probe_preset_config(provider: str, *, api_key: str = "", base_url: str = "",
+                        model: str = "", **_ignored) -> dict[str, Any]:
+    """根据 provider 调用对应探活函数。"""
     prov = (provider or "").strip().lower()
     if prov == "bailian":
-        return test_bailian(api_key=api_key, base_url=base_url, model=model)
+        return probe_bailian(api_key=api_key, base_url=base_url, model=model)
     if prov == "feihe":
-        return test_feihe(model=model)
+        return probe_feihe(model=model)
     return {"ok": False, "error": f"不支持的 provider: {provider}", "latency_ms": 0, "text": ""}

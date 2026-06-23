@@ -718,19 +718,38 @@ metrics:
 
   heli30_new_customer_num_total:
     label: 鹤礼3.0新客数
+    aliases: [鹤礼3.0新客数, 鹤礼3.0新客, 鹤礼新客数, 鹤礼新客, 鹤礼3新客数]
     table: ads_member_first_purchase_new_customer_total_df
     expression: "SUM(heli30_new_customer_num)"
     unit: 人
     display_format: integer_cn
     domain: member
+    higher_is_better: true
 
   heli30_repurchase_in_60_days_num_total:
     label: 鹤礼3.0 60天复购数
+    # 别名故意收录"鹤礼3.060天复购数"（无空格）——用户口语常把 3.0 与 60 连写，
+    # 而 label 里有空格，子串匹配匹配不到；不补这条别名就会回落到通用 60 天复购指标（审计 case 7）。
+    aliases: [鹤礼3.060天复购数, 鹤礼3.0复购数, 鹤礼复购数, 鹤礼3.060天复购人数, 鹤礼60天复购数, 鹤礼3.0 60天复购数]
     table: ads_member_first_purchase_new_customer_total_df
     expression: "SUM(heli30_repurchase_in_60_days_num)"
     unit: 人
     display_format: integer_cn
     domain: member
+    higher_is_better: true
+
+  heli30_repurchase_rate_60d:
+    label: 鹤礼3.0 60天复购率
+    # 审计 case 7 缺这一指标：原来"鹤礼3.0…复购率"只能落到通用 repurchase_rate_60d，
+    # 口径错成 普通60天复购/首购。鹤礼3.0 复购率必须用鹤礼自己的分子分母。
+    aliases: [鹤礼3.0复购率, 鹤礼3.060天复购率, 鹤礼复购率, 鹤礼3.0 60天复购率, 鹤礼60天复购率]
+    table: ads_member_first_purchase_new_customer_total_df
+    expression: "SUM(heli30_repurchase_in_60_days_num) / NULLIF(SUM(heli30_new_customer_num), 0)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    domain: member
+    higher_is_better: true
 
   # ===== 精准营养 =====
   potential_num_total:
@@ -753,7 +772,8 @@ metrics:
 
   potential_to_new_rate:
     label: 潜客转新率
-    aliases: [转化率, 潜客转化率]
+    # "转新率"/"转新"是用户最常用的口语（审计 case 8/12 全因缺这条别名落不到本指标）。
+    aliases: [转新率, 转新, 转化率, 潜客转化率, 潜客转新率, 转新客率]
     table: ads_precision_nutrition_potential_total_df
     expression: "SUM(potential_to_new_num) / NULLIF(SUM(potential_num), 0)"
     unit: "%"

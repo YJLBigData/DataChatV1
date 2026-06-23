@@ -148,7 +148,7 @@ export function useChat(opts: { enabled: boolean; user: AuthUser | null; llmChoi
 
       const handle = api.stream(
         { question: q, conversation_id: activeId, force_refresh: forceRefresh, llm_provider: llmChoice || undefined,
-          smartq_cube_ids: smartqContextIds.length ? smartqContextIds : null },
+          smartq_cube_ids: smartqContextIds.length ? smartqContextIds : [] },
         (evt) => {
           // session 事件：把 draft 迁移到真实 cid（如果当前 owner 是 draft）
           if (evt.stage === "session" && evt.payload?.conversation_id && currentCid === DRAFT_KEY) {

@@ -35,6 +35,7 @@
 """
 import asyncio
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
@@ -73,7 +74,7 @@ from app.api.support import trusted_result_for_trace as _trusted_result_for_trac
 from app.core.conversation import get_conversation_store
 from app.core.feishu import push as feishu_push, FeishuError
 from app.core.nl2sql.plan import QueryPlan
-from app.core.orchestrator import Pipeline, get_pipeline, to_sse_done, to_sse_error, to_sse_event, TraceEvent
+from app.core.orchestrator import Pipeline, PipelineCancelled, get_pipeline, to_sse_done, to_sse_error, to_sse_event, TraceEvent
 from app.core.folders import get_folders_store, FolderNotFound
 from app.core.permissions import get_permissions_store
 from app.core.query_log import get_query_log_store
@@ -100,6 +101,17 @@ def friendly_error(code: str, *, trace_id: str = "", extra: Optional[str] = None
     if extra:
         msg = f"{msg}（{extra}）"
     return {"ok": False, "error_code": code, "user_message": msg, "trace_id": trace_id}
+
+
+def friendly_rate_limit_response() -> JSONResponse:
+    """限流(429)的统一友好响应体：带 user_message + detail（前端 pickServerMessage 能读到），
+    替代 slowapi 默认的 {"error": "Rate limit exceeded: ..."}（英文、字段名前端旧版读不到）。"""
+    msg = "操作过于频繁，请稍候几秒后再试。"
+    return JSONResponse(
+        status_code=429,
+        content={"ok": False, "error_code": "RATE_LIMITED", "user_message": msg, "detail": msg},
+        headers={"Retry-After": "10"},
+    )
 
 
 def normalize_chat_result(value: Any) -> dict[str, Any]:
@@ -277,7 +289,22 @@ def create_app() -> FastAPI:
         # 全局上限 + 关键端点单独再细一档（端点处用 @limiter.limit 覆盖）
         _limiter = _SlowLimiter(key_func=_identify_token, default_limits=["120/minute"])
         app.state.limiter = _limiter
-        app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+        # 友好限流响应（审计修复）见模块级 friendly_rate_limit_response()：slowapi 默认 handler
+        # 回 {"error": "Rate limit exceeded: ..."}（英文、字段是 error，前端 pickServerMessage 旧版
+        # 只读 user_message/detail/message）→ 用户只会看到笼统的"问数服务暂时不可用"。
+        def _friendly_rate_limit_handler(request: Request, exc: Exception):
+            resp = friendly_rate_limit_response()
+            try:  # 保留 slowapi 的 X-RateLimit-* 响应头（便于排查），失败也不影响主响应
+                lim = getattr(request.app.state, "limiter", None)
+                view = getattr(request.state, "view_rate_limit", None)
+                if lim is not None and view is not None:
+                    resp = lim._inject_headers(resp, view)
+            except Exception:  # noqa: BLE001
+                pass
+            return resp
+
+        app.add_exception_handler(RateLimitExceeded, _friendly_rate_limit_handler)
         logger.info("rate-limit enabled: default=120/min, /api/chat=30/min per token")
     else:
         app.state.limiter = None
@@ -652,6 +679,20 @@ def create_app() -> FastAPI:
         if not guard.try_acquire(timeout=0.0):
             raise HTTPException(status_code=429, detail="当前问数服务繁忙，请稍后重试。")
 
+        # 名额释放**绑定到 worker 真实终态**，且只释放一次（P0 并发/取消修复）。
+        # 旧 bug：release 写在 gen() 的 finally，客户端一断开 gen() 立刻收尾归还名额，但
+        # run_in_executor 里的 worker 还在跑 LLM/DB —— 大量断开可绕过在途上限、放任后台烧算力。
+        # 现在：worker 跑完（成功/失败/被取消）才 release；断开只设取消信号，worker 在阶段边界自行收尾。
+        _released = threading.Event()
+
+        def _release_guard_once() -> None:
+            if not _released.is_set():
+                _released.set()
+                guard.release()
+
+        # 取消信号：gen() 在客户端断开/流结束时 set，worker 内的 pipeline 在阶段边界检查后尽快收尾。
+        cancel_event = threading.Event()
+
         try:
             queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
@@ -671,23 +712,43 @@ def create_app() -> FastAPI:
             def worker() -> None:
                 try:
                     _set_provider(chosen_provider)
-                    payload = _do_chat(pipe, store, user, req, on_event=on_event)
+                    payload = _do_chat(pipe, store, user, req, on_event=on_event, cancel_event=cancel_event)
                     loop.call_soon_threadsafe(queue.put_nowait, ("done", payload))
                 except Exception as exc:
                     loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
+                finally:
+                    # 不管成功/失败/取消，worker 一旦结束就归还在途名额（真实终态）。
+                    _release_guard_once()
 
             loop.run_in_executor(None, worker)
         except BaseException:
-            # 名额已占但还没把所有权交给 gen()（极少见，如 run_in_executor 失败）→ 立即归还。
-            guard.release()
+            # 名额已占但 worker 还没提交（极少见，如 run_in_executor 失败）→ 立即取消并归还。
+            cancel_event.set()
+            _release_guard_once()
             raise
+
+        # 心跳间隔：问数链路里"召回→规划(LLM)"之间可能有数十秒无 SSE 输出，
+        # 若中间代理(nginx/网关) proxy_read_timeout 短于此就会**中途断流**，用户侧表现为
+        # "问数服务暂时不可用"。这里每隔 _HEARTBEAT_S 吐一行 SSE 注释（": ..." 无 data，
+        # 前端解析器与 EventSource 都会忽略），让连接始终有字节流动，杜绝长耗时被代理掐断。
+        try:
+            _HEARTBEAT_S = max(5.0, float(_os.environ.get("CHAT_SSE_HEARTBEAT_SECONDS", "15") or "15"))
+        except (TypeError, ValueError):
+            _HEARTBEAT_S = 15.0
 
         async def gen() -> AsyncGenerator[str, None]:
             try:
+                # 立即吐一个注释行，强制刷出响应头 + 首字节：把"等首字节阶段"的代理超时
+                # 也转成已建立的流（再由心跳维持），避免新会话在 worker 起步慢时被代理 504。
+                yield ": connected\n\n"
                 if session_id:
                     yield to_sse_event(_simple_event("session", "ok", {"conversation_id": session_id}))
                 while True:
-                    kind, payload = await queue.get()
+                    try:
+                        kind, payload = await asyncio.wait_for(queue.get(), timeout=_HEARTBEAT_S)
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"   # 心跳：保持连接，绝不影响前端（无 data 行被忽略）
+                        continue
                     if kind == "event":
                         yield to_sse_event(payload)
                     elif kind == "done":
@@ -697,8 +758,10 @@ def create_app() -> FastAPI:
                         yield to_sse_error(str(payload))
                         break
             finally:
-                # gen() 被消费完 / 客户端断开 / 异常，都会走到这里 → 归还在途名额。
-                guard.release()
+                # gen() 被消费完 / 客户端断开 / 异常 → 通知 worker 取消（它在阶段边界检查后收尾）。
+                # 注意：这里**不再**直接 release —— 名额由 worker 终态归还，避免"断开即放名额、
+                # 后台还在跑"绕过在途上限。worker 早已结束时 set 取消信号是无害的空操作。
+                cancel_event.set()
 
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -789,7 +852,7 @@ def create_app() -> FastAPI:
 # helpers
 # =============================================================================
 
-def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=None) -> dict[str, Any]:
+def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=None, cancel_event=None) -> dict[str, Any]:
     """实际跑问数 + 落地会话消息 + 落地审计日志，返回响应字典。
 
     所有内部异常都被吞掉，返回 friendly_error。trace_id 让管理员能在日志中追查。
@@ -897,6 +960,7 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
 
         history = store.history_for_llm(session_id, limit=4)
         prev_plan: Optional[QueryPlan] = None
+        prev_rows: Optional[dict[str, Any]] = None
         sig = store.latest_assistant_plan_signature(session_id)
         if sig:
             for msg in store.list_messages(session_id, limit=20):
@@ -905,6 +969,16 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
                         prev_plan = QueryPlan.from_dict((msg.payload or {}).get("plan") or {})
                     except Exception:
                         prev_plan = None
+                    # 上一轮结果表（{columns, rows}）：供"这3个大区/这些省区"集合延续把
+                    # 真实选中的维度取值物化成 IN 过滤（审计 case 12-3/12-4）。
+                    try:
+                        tbl = ((msg.payload or {}).get("answer") or {}).get("table") or {}
+                        cols = tbl.get("columns") or []
+                        rows = tbl.get("rows") or []
+                        if cols and rows:
+                            prev_rows = {"columns": list(cols), "rows": list(rows)}
+                    except Exception:
+                        prev_rows = None
                     break
 
         store.append_message(session_id, "user", question, payload={})
@@ -915,10 +989,16 @@ def _do_chat(pipe: Pipeline, store, user: User, req: ChatRequest, *, on_event=No
                 is_admin=(user.role == "admin"),
                 history=history,
                 previous_plan=prev_plan,
+                previous_rows=prev_rows,
                 on_event=on_event,
                 force_refresh=req.force_refresh,
                 skip_llm_narrative=req.skip_llm_narrative,
+                cancel_event=cancel_event,
             )
+        except PipelineCancelled:
+            # 客户端中途断开：尽快收尾，不落库助手消息、不记错误日志（这不是失败，是用户走了）。
+            logger.info("[trace=%s user=%s] chat cancelled by client disconnect", trace_id, user.username)
+            return {"ok": False, "cancelled": True, "trace_id": trace_id}
         except Exception as exc:
             logger.exception("[trace=%s user=%s] pipeline crashed: %s", trace_id, user.username, exc)
             try:

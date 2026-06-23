@@ -21,8 +21,11 @@ class ChatRequest(BaseModel):
     skip_llm_narrative: bool = False
     # 右上角下拉框选的模型，None=用 env 默认（线上=feihe）
     llm_provider: Optional[str] = None
-    # 顶部「数据反问」选择的 Quick BI 智能小Q数据集；有值时本轮问数优先走 SmartQ。
-    smartq_cube_ids: list[str] = []
+    # 顶部「数据范围」选择的 Quick BI 智能小Q数据集；有值时本轮问数优先走 SmartQ。
+    # **必须容忍 null**：默认（飞鹤数据库）范围下前端会显式传 smartq_cube_ids:null，
+    # 若声明成 list[str] 则 Pydantic v2 直接 422（"Input should be a valid list"），
+    # 导致**最普通的问数全部失败**。这里用 Optional 接住 null，调用方再 (… or []) 归一为空列表。
+    smartq_cube_ids: Optional[list[str]] = Field(default_factory=list)
 
 
 class ConversationCreateReq(BaseModel):

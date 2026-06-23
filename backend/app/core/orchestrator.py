@@ -15,6 +15,8 @@ SSE stream events: stage / progress / partial / answer / error
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -36,6 +38,19 @@ from app.core.semantic import SemanticLayer
 from app.core.sse import to_sse_done, to_sse_error, to_sse_event  # noqa: F401
 
 logger = logging.getLogger("datachat.orchestrator")
+
+
+class _DirectSQLFallback(Exception):
+    """direct-SQL（模型直接写 SQL）阶段 LLM 不可用/失败时抛出，让 run() 回退到结构化 planner。
+
+    planner 自带"LLM 失败→规则兜底"，所以即便用户勾了「不使用缓存/走模型」(force_refresh)，
+    遇到网关瞬时抖动也能降级出结果，而不是硬失败成"问数失败"。仅 SQL 生成阶段触发；
+    guard/权限/执行等真实失败仍按 _failure_result 收口（不回退、不掩盖）。"""
+
+
+class PipelineCancelled(Exception):
+    """客户端在 SSE 流式问数中途断开 → 在阶段边界检测到取消信号时抛出，让 run() 尽快收尾，
+    不再继续后续昂贵的 LLM/DB 工作（P0 并发/取消修复：杜绝"断开后台还在烧算力"）。"""
 
 
 @dataclass
@@ -81,7 +96,17 @@ class Pipeline:
         self.llm = get_llm_router()
         self.retriever = HybridRetriever(self.semantic, self.llm)
         self.planner = Planner(self.semantic, self.retriever, self.llm)
-        self.compiler = PlanCompiler(self.semantic, default_limit=self.cfg.guard.max_rows)
+        # 表级最新分区缓存（审计 P1 时间口径）：相对时间按真实分区解析，避免"本月"落到无数据月。
+        self._latest_month_cache: dict[str, tuple[float, str | None]] = {}
+        self._latest_month_lock = threading.Lock()
+        try:
+            self._latest_month_ttl = float(os.environ.get("DATACHAT_LATEST_MONTH_TTL", "300") or "300")
+        except (TypeError, ValueError):
+            self._latest_month_ttl = 300.0
+        self.compiler = PlanCompiler(
+            self.semantic, default_limit=self.cfg.guard.max_rows,
+            latest_month_provider=self._table_latest_month,
+        )
         self.guard = SQLGuard(
             allowed_tables=self.semantic.tables.keys(),
             cfg=self.cfg.guard,
@@ -99,6 +124,43 @@ class Pipeline:
             logger.exception("warmup failed: %s", exc)
             return {"ok": False, "error": str(exc)}
 
+    def _table_latest_month(self, table_name: str) -> str | None:
+        """查该物理表真实最新月份 YYYY-MM（带 TTL 缓存）。供 compiler 解析相对时间用。
+
+        审计 P1：semantic.yaml 写死的 data_range.latest 可能领先真实分区（声称 2026-05，
+        实际 2026-04），"本月"于是落到无数据月、静默返回 0 行。这里按表级真实分区纠偏；
+        无 DB / 查询异常一律返回 None，由 compiler 安全回退到 semantic 口径（绝不抛错阻断主链路）。
+        """
+        tdef = self.semantic.table(table_name)
+        if not tdef:
+            return None
+        now = time.time()
+        with self._latest_month_lock:
+            hit = self._latest_month_cache.get(table_name)
+            if hit and (now - hit[0]) < self._latest_month_ttl:
+                return hit[1]
+        latest: str | None = None
+        try:
+            if tdef.is_year_month_split():
+                ycol = tdef.time_field_year or "year"
+                mcol = tdef.time_field_month or "month"
+                sql = (f"SELECT CONCAT(`{ycol}`, '-', LPAD(`{mcol}`, 2, '0')) AS m "
+                       f"FROM `{tdef.schema}`.`{tdef.name}` "
+                       f"ORDER BY `{ycol}` DESC, `{mcol}` DESC LIMIT 1")
+            elif tdef.time_field:
+                sql = f"SELECT MAX(`{tdef.time_field}`) AS m FROM `{tdef.schema}`.`{tdef.name}`"
+            else:
+                return None
+            res = self.executor.run_select(sql, max_rows=1, timeout_ms=5000)
+            if res.rows and res.rows[0] and res.rows[0][0]:
+                latest = str(res.rows[0][0])[:7]  # 取 YYYY-MM
+        except Exception as exc:  # noqa: BLE001 — 取分区失败不阻断主链路
+            logger.debug("table latest month probe failed for %s: %s", table_name, exc)
+            latest = None
+        with self._latest_month_lock:
+            self._latest_month_cache[table_name] = (now, latest)
+        return latest
+
     # ----------------------------------------------------------- run
 
     def run(
@@ -109,12 +171,20 @@ class Pipeline:
         is_admin: bool = False,
         history: list[dict[str, str]] | None = None,
         previous_plan: QueryPlan | None = None,
+        previous_rows: dict[str, Any] | None = None,
         on_event: Callable[[TraceEvent], None] | None = None,
         skip_llm_narrative: bool = False,
         force_refresh: bool = False,
+        cancel_event: "threading.Event | None" = None,
     ) -> PipelineResult:
         trace_id = uuid.uuid4().hex
         events: list[TraceEvent] = []
+
+        def _check_cancel(stage: str) -> None:
+            """阶段边界检查取消信号：客户端断开后，绝不再进入下一段昂贵工作（LLM/DB）。"""
+            if cancel_event is not None and cancel_event.is_set():
+                emit("cancelled", "ok", {"at": stage}, 0)
+                raise PipelineCancelled(stage)
 
         def emit(stage: str, status: str, payload: dict[str, Any] | None = None, elapsed_ms: int = 0) -> None:
             evt = TraceEvent(stage=stage, status=status, payload=payload or {}, elapsed_ms=elapsed_ms, timestamp=datetime.utcnow().isoformat() + "Z")
@@ -132,6 +202,9 @@ class Pipeline:
         if not question_clean:
             emit("input", "error", {"reason": "empty"}, 0)
             return PipelineResult(trace_id=trace_id, question="", answer={"narrative": "请输入问题。"}, plan={}, sql="", rows=0, elapsed_ms=0, cached=False, events=[e.to_dict() for e in events])
+
+        # 入口即检查取消：客户端在派发前就断开（含命中缓存的极快路径）也不开工。
+        _check_cancel("start")
 
         # Stage 0.5: 用户数据域（检索分域 / guard 白名单 / 缓存 key 三处共用）。
         # 构建失败不阻断主链路：检索退回全量，强制拦截仍由 Stage 3.6 + guard fail-closed 兜底。
@@ -215,6 +288,9 @@ class Pipeline:
                         events=[e.to_dict() for e in events],
                     )
 
+        # 取消检查（昂贵的 LLM 规划/直写 SQL 之前）：客户端已断开就别再开工。
+        _check_cancel("plan")
+
         # Stage 1.5: 路由到 direct-SQL（让模型直接生成 SQL 出结果）。触发条件：
         #   · 用户勾选「不使用缓存（每次都重新计算）」force_refresh —— 明确要"走模型"，
         #     不要结构化 planner 那套受限 JSON；直接让大模型按完整问题写 SQL；
@@ -230,13 +306,18 @@ class Pipeline:
                     run_started=run_started, trace_id=trace_id, events=events, emit=emit,
                     history=history, previous_plan=previous_plan, scope=scope,
                 )
+        except _DirectSQLFallback as exc:
+            # direct-SQL 的 LLM 不可用/失败 → 优雅回退到结构化 planner（自带规则兜底），
+            # 不让 force_refresh / 复杂问题在网关抖动时硬失败成"问数失败"。
+            emit("route", "planner_fallback", {"reason": "direct_sql_llm_unavailable"}, 0)
+            logger.info("direct_sql LLM unavailable (%s) — falling back to structured planner", str(exc)[:120])
         except Exception as exc:
             logger.warning("direct_sql route check failed: %s — falling back to planner", exc)
 
         # Stage 2 + 3: retrieval + plan (planner internally calls retriever; 按 scope 分域)
         plan_started = time.perf_counter()
         try:
-            plan_result = self.planner.plan(question_clean, history=history, previous_plan=previous_plan, scope=scope)
+            plan_result = self.planner.plan(question_clean, history=history, previous_plan=previous_plan, previous_rows=previous_rows, scope=scope)
         except LLMError as exc:
             emit("plan", "error", {"reason": str(exc)}, int((time.perf_counter() - plan_started) * 1000))
             return PipelineResult(
@@ -480,6 +561,8 @@ class Pipeline:
             )
             emit("execute", "cache_hit", {"layer": "L3", "rows": exec_obj.row_count}, 0)
         else:
+            # 取消检查（真正打 DB 之前）：断开就不发这条可能很重的查询。
+            _check_cancel("execute")
             exec_started = time.perf_counter()
             try:
                 exec_obj = self.executor.run_select(guarded_sql, max_rows=self.cfg.guard.max_rows, timeout_ms=self.cfg.guard.statement_timeout_ms)
@@ -510,9 +593,26 @@ class Pipeline:
                 pass
 
         # Stage 7: answer
+        # 取消检查（叙述 LLM 之前）：已执行完拿到数据，但客户端走了就别再花一次 LLM 生成叙述。
+        _check_cancel("answer")
         answer_started = time.perf_counter()
         answer_payload = self.answerer.build(question_clean, plan, meta, exec_obj, guarded_sql, skip_llm=skip_llm_narrative)
         answer_ms = int((time.perf_counter() - answer_started) * 1000)
+
+        # 相对时间却 0 行：明确告知"最新可用月份"，杜绝静默空表误导用户（审计 P1 时间口径）。
+        try:
+            tr_kind = str(getattr(plan.time_range.kind, "value", plan.time_range.kind))
+            if exec_obj is not None and exec_obj.row_count == 0 and tr_kind == "relative":
+                latest = self._table_latest_month(plan.table) or self.semantic.data_range_latest
+                if latest:
+                    note = (f"所选时间范围内暂无数据。该数据集当前最新可用月份为 {latest}，"
+                            f"请改用具体月份（如「{latest}」）后重试。")
+                    cur = str((answer_payload or {}).get("narrative") or "")
+                    if "最新可用月份" not in cur:
+                        answer_payload["narrative"] = note + (("\n\n" + cur) if cur else "")
+                    emit("data_range", "empty_relative", {"latest": latest, "table": plan.table}, 0)
+        except Exception as exc:  # noqa: BLE001 — 提示性增强，绝不影响主结果
+            logger.debug("data-range note skipped: %s", exc)
         emit("answer", "ok", {
             "chart": (answer_payload.get("chart") or {}).get("type"),
             "llm_wait_ms": 0 if skip_llm_narrative else answer_ms,
@@ -581,10 +681,9 @@ class Pipeline:
             )
         except Exception as exc:
             emit("direct_sql", "llm_error", {"reason": str(exc)[:200]}, int((time.perf_counter() - gen_started) * 1000))
-            return self._failure_result(
-                question, trace_id, run_started, events,
-                "生成 SQL 失败，请稍后再试或换一种问法。",
-            )
+            # LLM 写 SQL 失败 → 不硬失败，抛回退信号让 run() 走结构化 planner（含规则兜底），
+            # 保证 force_refresh/复杂问题在网关抖动时仍能降级出结果。
+            raise _DirectSQLFallback(str(exc)) from exc
         if not sql:
             return self._failure_result(question, trace_id, run_started, events,
                                         "未生成有效 SQL，请稍后再试或换一种问法。")

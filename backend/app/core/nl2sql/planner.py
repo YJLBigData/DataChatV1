@@ -33,6 +33,10 @@ from .plan import HavingFilter, OrderBy, PlanFilter, QueryPlan, TimeKind, TimeRa
 logger = logging.getLogger("datachat.planner")
 
 
+# 顺序敏感：命中即 break，所以**更具体的口径**（同比/环比/占比/差值/趋势/累计）必须排在
+# 通用的"排名"之前。否则"…差异是多少？差异最大的前10个大区"里的"前"会先把 calculation
+# 钉成 rank，盖掉 delta（审计 case 3 回归）。"前/topN" 的数量本就由下方 rank_n 正则单独提取，
+# 这里不再保留裸"前"作为口径关键词（它会误命中"之前/前面/目前"）。
 CALCULATION_KEYWORDS: dict[str, str] = {
     "同比": "yoy_growth",
     "同比增长": "yoy_growth",
@@ -43,16 +47,44 @@ CALCULATION_KEYWORDS: dict[str, str] = {
     "占比": "ratio",
     "比例": "ratio",
     "比重": "ratio",
+    "趋势": "trend",
+    "走势": "trend",
+    "差异": "delta",
+    "差值": "delta",
+    "差距": "delta",
+    "差额": "delta",
+    "累计": "cumulative",
+    "累积": "cumulative",
     "排名": "rank",
     "排行": "rank",
     "top": "rank",
-    "前": "rank",
-    "趋势": "trend",
-    "走势": "trend",
-    "差值": "delta",
-    "差距": "delta",
-    "累计": "cumulative",
-    "累积": "cumulative",
+}
+
+# 鹤礼3.0 上下文：问句一旦带"鹤礼/heli"，通用首购/复购/复购率口径必须切到鹤礼专属字段，
+# 否则"鹤礼3.0复购率"会错算成 普通60天复购/首购（审计 case 7）。仅在命中鹤礼时启用。
+HELI30_METRIC_REMAP: dict[str, str] = {
+    "first_purchase_num_total": "heli30_new_customer_num_total",
+    "repurchase_in_60_days_num_total": "heli30_repurchase_in_60_days_num_total",
+    "repurchase_rate_60d": "heli30_repurchase_rate_60d",
+}
+
+# 销售额跨表同义：终端汇总 terminal_sale_amount / 门店明细 shop_sale_amount /
+# 目标实绩 shop_sale_amount_actual 都是用户口里的"销售额/销售金额"。当一句话被迫落到
+# 门店明细表（问到门店/导购/经销商/件数）时，"销售额"要按角色对齐到该表的金额指标，
+# 而不是因表达式不同就丢掉（审计 case 9：Top20 门店明细漏了销售金额）。
+SALES_AMOUNT_ROLE_EQUIV: dict[str, dict[str, str]] = {
+    "terminal_sale_amount_total": {
+        "ads_bi_hs_sale_info_df": "shop_sale_amount_total",
+        "ads_bi_month_shop_item_dan_target_summary_df": "shop_sale_amount_actual_total",
+    },
+    "shop_sale_amount_total": {
+        "ads_bi_month_shop_item_dan_summary_df": "terminal_sale_amount_total",
+        "ads_bi_month_shop_item_dan_target_summary_df": "shop_sale_amount_actual_total",
+    },
+    "shop_sale_amount_actual_total": {
+        "ads_bi_month_shop_item_dan_summary_df": "terminal_sale_amount_total",
+        "ads_bi_hs_sale_info_df": "shop_sale_amount_total",
+    },
 }
 
 PERIOD_KEYWORDS: dict[str, tuple[str, int]] = {
@@ -159,6 +191,28 @@ class Planner:
             for a in m.all_aliases():
                 if a and len(a) >= 2 and a in t and len(a) > best_len:
                     best_name, best_len = m.name, len(a)
+        return best_name
+
+    def _nearest_metric_in_text(self, text: str, *, from_left: bool = True) -> str:
+        """返回文本里**最贴近算子**的指标。from_left=True 取最靠右出现的（算子在其后，
+        如"…潜客人数大于50但转新率"里"低于5%"应绑"转新率"而非更长但更远的"潜客人数"，
+        审计 case 12-4）；from_left=False 取最靠左出现的（"低于5%的转新率"语序）。"""
+        t = text or ""
+        best_name, best_pos, best_len = "", None, 0
+        for m in self.semantic.list_metrics():
+            for a in m.all_aliases():
+                if not a or len(a) < 2:
+                    continue
+                pos = t.rfind(a) if from_left else t.find(a)
+                if pos < 0:
+                    continue
+                better = (
+                    best_pos is None
+                    or (pos > best_pos if from_left else pos < best_pos)
+                    or (pos == best_pos and len(a) > best_len)
+                )
+                if better:
+                    best_name, best_pos, best_len = m.name, pos, len(a)
         return best_name
 
     @staticmethod
@@ -321,6 +375,7 @@ class Planner:
         *,
         history: list[dict[str, str]] | None = None,
         previous_plan: QueryPlan | None = None,
+        previous_rows: dict[str, Any] | None = None,  # 上一轮结果表 {columns, rows}，供"这N个"集合延续
         today: date | None = None,
         scope: Any | None = None,   # permissions.UserScope；None = 不分域（兼容旧调用）
     ) -> PlanResult:
@@ -407,7 +462,7 @@ class Planner:
         plan = self._validate_and_repair(
             plan, bundle, rule_seed, today=today or date.today(),
             previous_plan=previous_plan, followup=followup, question=question,
-            allowed_tables=allowed,
+            allowed_tables=allowed, previous_rows=previous_rows,
         )
 
         # Save to cache
@@ -601,6 +656,19 @@ class Planner:
                 cn_map = {"一":1,"二":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10}
                 seed["rank_n"] = cn_map.get(cn_rank.group(1), 10)
                 seed["calculation"] = seed["calculation"] or "rank"
+        # 最值 + 数量（"转新率最低的5个大区"/"销售金额最高的20个门店"/"最低3个"）。
+        # 这类问法没有"前/top"字样，旧逻辑取不到 N。这里补 rank_n→limit，但**不**强制
+        # calculation=rank（口径可能是普通聚合/比率，只是要排序+截断），排序方向交给 order_hint。
+        if not seed["rank_n"]:
+            mm = re.search(r"(?:最[高低多少大小好差强弱优]|倒数第?)\D{0,4}?(\d{1,3})", q)
+            if mm:
+                seed["rank_n"] = int(mm.group(1))
+            else:
+                # 关键：排除"这/那 N 个"这类对上一轮集合的回指（如"把这3个大区下钻到省区"），
+                # 它不是新的 TopN 截断；否则会把结果错截成只剩 N 行（审计 case 12-3）。
+                mm2 = re.search(r"(?<![这那这些那些上述前述])(\d{1,3})\s*(?:个|名|家|位)(?!\s*月)", q)
+                if mm2:
+                    seed["rank_n"] = int(mm2.group(1))
         # period
         for k, (period, n) in PERIOD_KEYWORDS.items():
             if k in q or k in ql:
@@ -628,14 +696,26 @@ class Planner:
         # "是"/"否" 是单字，会命中"分别是多少/达成率是"等任何中文问句，
         # 造成 `WHERE 列='是'` 这种莫名其妙的过滤。单字一律不作为过滤信号。
         for d in self.semantic.list_dimensions():
+            # 关键修复（审计 case 6-2）：一个维度可能被点名多个值（"1段、2段、3段"）。
+            # 旧逻辑命中首个就 break，导致只筛 1 段、漏 2/3 段。改为**收集全部命中值**，
+            # 多于一个时按 op=in 下发，并把该维度纳入分组（见 validate_and_repair）。
+            vals: list[str] = []
             for v in d.sample_values:
-                if v and len(str(v)) >= 2 and v in q:
-                    seed["filter_hits"].append({"dimension": d.name, "value": v})
-                    break
-            for code, label in (d.value_dict or {}).items():
-                if label and len(str(label)) >= 2 and label in q:
-                    seed["filter_hits"].append({"dimension": d.name, "value": code})
-                    break
+                sv = str(v)
+                if v and len(sv) >= 2 and sv in q and sv not in vals:
+                    vals.append(sv)
+            if not vals:
+                for code, label in (d.value_dict or {}).items():
+                    if label and len(str(label)) >= 2 and label in q:
+                        vals.append(str(code))
+                        break  # 代码值（value_dict）一般单选即可
+            if vals:
+                seed["filter_hits"].append({
+                    "dimension": d.name,
+                    "value": vals[0],            # 向后兼容：保留首值
+                    "values": vals,
+                    "op": "in" if len(vals) > 1 else "eq",
+                })
 
         # group_by hint: 在/按<dim>、各<dim>、每个<dim>、<dim>排名/排行
         # plus "前N的<dim>" or "<dim>前N" → both rank-on-dim
@@ -671,6 +751,10 @@ class Planner:
                 # 排前N的<dim>, 前N<dim>, TopN<dim>
                 rf"(?:前|top)\s*\d{{1,3}}\s*(?:名)?\s*的?\s*{re.escape(alias)}",
                 rf"前(?:一|二|三|四|五|六|七|八|九|十)\s*(?:名)?\s*的?\s*{re.escape(alias)}",
+                # N个/N家/N名 <dim>（"销售额最高的20个门店"、"转新率最低的5个大区"）
+                rf"\d{{1,3}}\s*(?:个|名|家|位)\s*的?\s*{re.escape(alias)}",
+                # 最X的<dim>（"最高的门店"、"最低的省区"）—最值词与维度名相邻
+                rf"最[高低多少大小好差强弱优]\D{{0,5}}?{re.escape(alias)}",
                 # <dim>对比 / <dim>之间
                 rf"{re.escape(alias)}\s*对比",
                 rf"{re.escape(alias)}\s*之间",
@@ -679,6 +763,21 @@ class Planner:
                 if re.search(pat, q, re.IGNORECASE):
                     seed["group_by_hint"].append(dim_name)
                     break
+        # 列举型输出维度（"列出门店名称、经销商、城市、导购姓名…"，审计 case 9）：
+        # 用户用"列出/列举/显示…"罗列了一串要看的维度。这些不带"各/按"前缀，常规模式抓不到。
+        # 命中列举动词时，把问句里出现的维度别名全部纳入分组（仅维度，指标不会被加进来）。
+        if re.search(r"列出|列举|给出|显示|展示|罗列|列示|呈现|输出|包含|包括", q):
+            for alias, dim_name in dim_alias_re:
+                if dim_name in seed["group_by_hint"]:
+                    continue
+                if len(alias) >= 2 and alias in q:
+                    seed["group_by_hint"].append(dim_name)
+
+        # 二值维度专项触发：is_guide_shop 的样例值"是/否"是单字（被过滤），且口语
+        # 是"有导门店/非导门店"。问句同时出现"有导"和"非导"=要按是否有导分组（审计 case 10）。
+        if ("有导" in q and ("非导" in q or "无导" in q)) and "is_guide_shop" not in seed["group_by_hint"]:
+            seed["group_by_hint"].append("is_guide_shop")
+
         # de-dup, keep order
         seen = set()
         uniq = []
@@ -704,16 +803,21 @@ class Planner:
                 seed["metric_hits"].append(name)
                 seen_m.add(name)
 
-        # order_hint：显式排序方向（"按达成率从低到高排序"）。先确定方向词，再就近找指标别名。
+        # order_hint：排序方向（"按达成率从低到高"显式短语，或"转新率最低/销售额最高"最值词）。
+        # 最值词与显式短语共用一套就近绑定：方向词左侧最近的指标别名=排序字段（审计 case 8/9/12）。
         ASC_PAT = r"(从低到高|从小到大|由低到高|由小到大|升序|正序|低到高|小到大)"
         DESC_PAT = r"(从高到低|从大到小|由高到低|由大到小|降序|倒序|高到低|大到小)"
+        ASC_SUP = r"(最低|最少|最小|最差|最弱|最末|垫底|倒数)"
+        DESC_SUP = r"(最高|最多|最大|最好|最强|最优|最畅销)"
+        ASC_ALL = rf"(?:{ASC_PAT}|{ASC_SUP})"
+        DESC_ALL = rf"(?:{DESC_PAT}|{DESC_SUP})"
         order_dir = ""
-        if re.search(ASC_PAT, q):
+        if re.search(ASC_ALL, q):
             order_dir = "asc"
-        elif re.search(DESC_PAT, q):
+        elif re.search(DESC_ALL, q):
             order_dir = "desc"
         if order_dir:
-            dir_pat = ASC_PAT if order_dir == "asc" else DESC_PAT
+            dir_pat = ASC_ALL if order_dir == "asc" else DESC_ALL
             order_field = ""
             best_alias_len = 0
             for m in self.semantic.list_metrics():
@@ -745,9 +849,13 @@ class Planner:
                 val *= 1e4
             elif unit == "亿":
                 val *= 1e8
-            left = q[max(0, hm.start() - 12):hm.start()]
-            right = q[hm.end():hm.end() + 12]
-            metric_name = self._metric_name_in_text(left) or self._metric_name_in_text(right)
+            # 就近绑定：左窗取**最靠右**的指标（紧贴算子的那个），右窗取**最靠左**的。
+            # 这样"潜客人数大于50但转新率低于5%"里，"低于5%"绑到最近的"转新率"，
+            # 不会被更长但更远的"潜客人数"抢走（审计 case 12-4 的 SUM(potential_num)<5 错绑根因）。
+            left = q[max(0, hm.start() - 16):hm.start()]
+            right = q[hm.end():hm.end() + 16]
+            metric_name = (self._nearest_metric_in_text(left, from_left=True)
+                           or self._nearest_metric_in_text(right, from_left=False))
             seed["having_hints"].append({
                 "metric": metric_name,
                 "op": op,
@@ -758,12 +866,26 @@ class Planner:
         return seed
 
     def _rule_only_plan(self, question: str, bundle: RetrievalBundle, rule_seed: dict[str, Any], today: date) -> dict[str, Any]:
-        metric = bundle.metrics[0].name if bundle.metrics else ""
+        # 主指标优先用问句显式点名的指标（rule_seed.metric_hits），召回结果仅作兜底。
+        # 这样规则兜底路径（LLM 不可用）也能稳定选对指标，不被检索排序波动带偏 —— 同时让
+        # 确定性回归用例（强制旁路 LLM）能独立于检索打分跑通。
+        metric = ""
+        for cand in (rule_seed.get("metric_hits") or []):
+            if self.semantic.metric(cand):
+                metric = cand
+                break
+        if not metric:
+            metric = bundle.metrics[0].name if bundle.metrics else ""
         return {
             "metric": metric,
+            "extra_metrics": [m for m in (rule_seed.get("metric_hits") or []) if m != metric and self.semantic.metric(m)],
             "table": (self.semantic.metric(metric).table if metric and self.semantic.metric(metric) else ""),
             "group_by": list(rule_seed.get("group_by_hint") or []),
-            "filters": [{"dimension": h["dimension"], "op": "eq", "values": [h["value"]]} for h in rule_seed.get("filter_hits", [])],
+            "filters": [
+                {"dimension": h["dimension"], "op": (h.get("op") or "eq"),
+                 "values": list(h.get("values") or [h.get("value")])}
+                for h in rule_seed.get("filter_hits", [])
+            ],
             "time_range": {
                 "kind": ("absolute" if rule_seed.get("absolute") else ("relative" if rule_seed.get("period") else "none")),
                 "period": rule_seed.get("period") or "",
@@ -794,8 +916,16 @@ class Planner:
         followup: bool = False,
         question: str = "",
         allowed_tables: "frozenset[str] | None" = None,
+        previous_rows: dict[str, Any] | None = None,
     ) -> QueryPlan:
         inherit = bool(followup and previous_plan and previous_plan.metric)
+        carryover_fired = False
+
+        # 鹤礼3.0 上下文：问句带"鹤礼/heli"时，通用首购/复购/复购率口径一律切到鹤礼专属指标。
+        heli30_ctx = ("鹤礼" in question) or ("heli" in (question or "").lower())
+
+        def _heli30(name: str) -> str:
+            return HELI30_METRIC_REMAP.get(name, name) if heli30_ctx else name
 
         # 0. 多轮继承（确定性兜底）——"携带状态，只叠加显式增量"。
         #    即便 LLM/召回完全无视多轮规则，这一步也能把指标/表/时间纠回上一轮，
@@ -864,10 +994,13 @@ class Planner:
         #     其余作为附带列一起 SELECT。仅在非多轮继承时整体改写（追问已在 step 0 处理）。
         #     这是把"LLM 漏选 extra_metrics / 选错表"彻底补齐的确定性兜底。
         metric_hits = list(rule_seed.get("metric_hits") or [])
+        # 鹤礼3.0 口径纠正：通用首购/复购/复购率 → 鹤礼专属（审计 case 7），去重保序。
+        if heli30_ctx:
+            metric_hits = list(dict.fromkeys(_heli30(m) for m in metric_hits))
         if len(metric_hits) >= 2 and not inherit:
             best_t, mapped = self._best_table_for_metrics(metric_hits)
             if best_t and len(mapped) >= 2:
-                order_field = (rule_seed.get("order_hint") or {}).get("field") or ""
+                order_field = _heli30((rule_seed.get("order_hint") or {}).get("field") or "")
                 primary = self._equivalent_metric_on_table(order_field, best_t) if order_field else None
                 if not primary or primary not in mapped:
                     cur = self._equivalent_metric_on_table(plan.metric, best_t)
@@ -898,7 +1031,9 @@ class Planner:
         existing_filter_dims = {f.dimension for f in plan.filters}
         for hit in rule_seed.get("filter_hits") or []:
             if hit["dimension"] not in existing_filter_dims:
-                plan.filters.append(PlanFilter(dimension=hit["dimension"], op="eq", values=[hit["value"]], raw=hit["value"]))
+                vals = [str(v) for v in (hit.get("values") or [hit.get("value")]) if v]
+                op = hit.get("op") or ("in" if len(vals) > 1 else "eq")
+                plan.filters.append(PlanFilter(dimension=hit["dimension"], op=op, values=vals, raw="、".join(vals)))
         clean_filters: list[PlanFilter] = []
         seen_fdims: set[str] = set()
         for f in plan.filters:
@@ -915,6 +1050,30 @@ class Planner:
             seen_fdims.add(rd)
         plan.filters = clean_filters
 
+        # 4-set. 集合延续（审计 case 12-3/12-4）："把这3个大区下钻到省区"——上一轮 TopN/BottomN
+        #        选出的对象集合，本轮"这N个/这些/上述<dim>"必须严格沿用。把上一轮结果表里该维度
+        #        的真实取值物化成 IN 过滤（数据相关，规则无法凭空知道是哪几个，只能取上一轮结果）。
+        if inherit and previous_rows and previous_plan and previous_plan.group_by:
+            if re.search(r"(?:这|那|上述|前述|前面)\s*(?:\d+|[一二三四五六七八九十]+)?\s*个|这些|那些|这几个|那几个", question):
+                carry_dim = ""
+                for gd in previous_plan.group_by:
+                    if gd in (previous_rows.get("columns") or []):
+                        carry_dim = gd
+                        break
+                vals = self._carryover_values(previous_rows, carry_dim) if carry_dim else []
+                rd = self._remap_dim(carry_dim, plan.table) if carry_dim else None
+                if vals and rd and rd not in {f.dimension for f in plan.filters}:
+                    plan.filters.append(PlanFilter(dimension=rd, op="in", values=vals, raw="上一轮选出的集合"))
+                    carryover_fired = True
+                    logger.info("plan.carryover dim=%s values=%s", rd, vals)
+
+        # 4a. 多值过滤的维度纳入分组：筛了"1段、2段、3段"就要按段位分别展示（审计 case 6-2）。
+        #     单值等值过滤不在此列（那是锁定一个值，由 4b 反而要从分组里剔除）。
+        for f in plan.filters:
+            multi = (f.op == "in") or (len(f.values) > 1)
+            if multi and f.dimension not in plan.group_by and self._dim_valid(f.dimension, plan.table):
+                plan.group_by.append(f.dimension)
+
         # 4b. 被单值等值过滤锁定的维度，没必要再 group by
         #     （"只看东一区 + 拆到省区" → 只按省区，不再按大区）
         single_eq = {f.dimension for f in plan.filters if f.op == "eq" and len(f.values) == 1}
@@ -922,6 +1081,16 @@ class Planner:
             trimmed = [g for g in plan.group_by if g not in single_eq]
             if trimmed:
                 plan.group_by = trimmed
+
+        # 4c. 鹤礼3.0 口径纠正（单指标/LLM 直给路径兜底）：主指标与附带指标里的通用
+        #     首购/复购/复购率，在鹤礼上下文下一律换成鹤礼专属指标（审计 case 7）。
+        if heli30_ctx:
+            mapped_primary = _heli30(plan.metric)
+            if mapped_primary != plan.metric and self.semantic.metric(mapped_primary):
+                plan.metric = mapped_primary
+                metric_def = self.semantic.metric(plan.metric) or metric_def
+                plan.table = metric_def.table
+            plan.extra_metrics = [_heli30(m) for m in plan.extra_metrics]
 
         # 5. extra metrics: must be on same table
         plan.extra_metrics = [
@@ -1012,8 +1181,18 @@ class Planner:
         if not plan.calculation and rule_seed.get("calculation"):
             plan.calculation = rule_seed["calculation"]
 
-        # 7b. limit 继承（上一轮是 TopN，本轮没给新的 TopN）
-        if not plan.limit and inherit and previous_plan.limit and not rule_seed.get("rank_n"):
+        # 7a. 差值题统一按差值绝对值排序（compiler 输出 diff_abs 列）。"差异最大/最多"→降序，
+        #     "差异最小/最少"→升序。这里直接钉死 order_by，覆盖 step 6 里就近绑到原指标的误排
+        #     （审计 case 3：旧逻辑按还原过单金额排序，而非按差异）。
+        if plan.calculation == "delta":
+            ddir = "asc" if re.search(r"最[小低少]|差异最小|差距最小", question) else "desc"
+            plan.order_by = [OrderBy(field="diff_abs", dir=ddir)]
+
+        # 7b. limit 继承（上一轮是 TopN，本轮没给新的 TopN）。
+        #     集合延续已把上一轮 TopN 物化成 IN 过滤，这时绝不能再继承 limit=N，
+        #     否则"这3个大区下钻到省区"会被截成只剩3行（审计 case 12-3）。
+        if (not plan.limit and inherit and previous_plan.limit
+                and not rule_seed.get("rank_n") and not carryover_fired):
             plan.limit = previous_plan.limit
 
         # 8. time range — apply rules / defaults / 多轮继承
@@ -1025,6 +1204,15 @@ class Planner:
         # 9. calc → rank infers limit
         if plan.calculation == "rank" and not plan.limit:
             plan.limit = rule_seed.get("rank_n") or 10
+
+        # 9b. 通用 TopN 截断：问句给了"最低/最高的 N 个"等数量（rank_n），无论口径是普通聚合、
+        #     比率还是差值，都要落成 LIMIT N（审计 case 8/9/12：转新率最低5个、销售额最高20个门店）。
+        if rule_seed.get("rank_n") and not plan.limit:
+            plan.limit = rule_seed["rank_n"]
+        # 9c. 集合延续时清掉残留 limit（本轮没有新 TopN）：要看"这3个大区"下全部省区/渠道，
+        #     而不是再截前N（审计 case 12-3/12-4）。
+        if carryover_fired and not rule_seed.get("rank_n"):
+            plan.limit = 0
 
         # 10. low-confidence => clarify ONLY if metric is unambiguous-bad
         # (we are accuracy-first, but "宁可澄清也不能答错" → never clarify when metric+group_by+filter exist)
@@ -1149,6 +1337,37 @@ class Planner:
         return table in d.table_columns
 
     @staticmethod
+    def _carryover_values(prev_table: dict[str, Any] | None, dim: str) -> list[str]:
+        """从上一轮结果表里取某维度的去重取值（按出现顺序）。用于"这N个/这些"集合延续。
+
+        结果表形如 {"columns": ["region", ...], "rows": [["东二区", ...], ...]}（位置对应）。
+        防御式解析：列不存在 / 行残缺 / 空值都安全跳过，绝不抛错。
+        """
+        if not prev_table:
+            return []
+        cols = prev_table.get("columns") or []
+        rows = prev_table.get("rows") or []
+        if dim not in cols:
+            return []
+        idx = cols.index(dim)
+        seen: set[str] = set()
+        out: list[str] = []
+        for r in rows:
+            if isinstance(r, (list, tuple)) and idx < len(r):
+                v = r[idx]
+            elif isinstance(r, dict):
+                v = r.get(dim)
+            else:
+                v = None
+            if v is None:
+                continue
+            sv = str(v)
+            if sv and sv not in seen:
+                seen.add(sv)
+                out.append(sv)
+        return out
+
+    @staticmethod
     def _norm_expr(expr: str) -> str:
         return "".join((expr or "").lower().split())
 
@@ -1168,6 +1387,10 @@ class Planner:
         for m in self.semantic.list_metrics():
             if m.table == table and self._norm_expr(m.expression) == target_expr:
                 return m.name
+        # 角色等价兜底：销售额跨表同义（表达式不同但业务同义），按角色映射到目标表。
+        role = SALES_AMOUNT_ROLE_EQUIV.get(metric_name, {}).get(table)
+        if role and self.semantic.metric(role):
+            return role
         return None
 
     def _best_table_for_metrics(self, names: list[str]) -> tuple[str | None, list[str]]:

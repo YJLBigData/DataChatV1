@@ -1,0 +1,4 @@
+interface:
+  display_name: "DataChat Audit Fix"
+  short_description: "Strict DataChatV1 repair workflow"
+  default_prompt: "Use $claude-datachat-audit-fix to fix DataChatV1 according to the bundled strict audit report and verification gates."

@@ -1,0 +1,373 @@
+[
+  {
+    "case": "3-1_diff_region",
+    "ok": true,
+    "rows": 8,
+    "columns": [
+      "region",
+      "terminal_sale_amount_total",
+      "reduction_gd_sale_amount_total",
+      "diff_amount",
+      "diff_abs"
+    ],
+    "preview": [
+      [
+        "北一区",
+        626613.3,
+        469156.184883,
+        157457.115117,
+        157457.115117
+      ],
+      [
+        "东一区",
+        314155.1,
+        249603.027427,
+        64552.072573,
+        64552.072573
+      ]
+    ],
+    "sql": "SELECT lev2_name AS region,\n       SUM(terminal_sale_amount) AS terminal_sale_amount_total,\n       SUM(reduction_gd_sale_amount) AS reduction_gd_sale_amount_total,\n       SUM(terminal_sale_amount) - SUM(reduction_gd_sale_amount) AS diff_amount,\n       ABS(SUM(terminal_sale_amount) - SUM(reduction_gd_sale_amount)) AS diff_abs\nFROM chatbi.ads_bi_month_shop_item_dan_summary_df\nWHERE year='2025' AND month='01'\nGROUP BY lev2_name\nORDER BY diff_abs DESC\nLIMIT 10"
+  },
+  {
+    "case": "3-2_diff_sub_region",
+    "ok": true,
+    "rows": 10,
+    "columns": [
+      "region",
+      "sub_region",
+      "terminal_sale_amount_total",
+      "reduction_gd_sale_amount_total",
+      "diff_amount",
+      "diff_abs"
+    ],
+    "preview": [
+      [
+        "北一区",
+        "黑龙江",
+        285412.9,
+        202525.721853,
+        82887.178147,
+        82887.178147
+      ],
+      [
+        "北一区",
+        "吉林",
+        243389.8,
+        182381.785279,
+        61008.014721,
+        61008.014721
+      ]
+    ],
+    "sql": "SELECT lev2_name AS region, lev3_name AS sub_region,\n       SUM(terminal_sale_amount) AS terminal_sale_amount_total,\n       SUM(reduction_gd_sale_amount) AS reduction_gd_sale_amount_total,\n       SUM(terminal_sale_amount) - SUM(reduction_gd_sale_amount) AS diff_amount,\n       ABS(SUM(terminal_sale_amount) - SUM(reduction_gd_sale_amount)) AS diff_abs\nFROM chatbi.ads_bi_month_shop_item_dan_summary_df\nWHERE year='2025' AND month='01'\nGROUP BY lev2_name, lev3_name\nORDER BY diff_abs DESC\nLIMIT 10"
+  },
+  {
+    "case": "6-2_stage_123_by_region",
+    "ok": true,
+    "rows": 24,
+    "columns": [
+      "region",
+      "item_dan",
+      "first_purchase_num_total",
+      "repurchase_in_60_days_num_total",
+      "repurchase_rate_60d"
+    ],
+    "preview": [
+      [
+        "东一区",
+        "1段",
+        74.0,
+        18.0,
+        0.2432
+      ],
+      [
+        "东一区",
+        "2段",
+        72.0,
+        15.0,
+        0.2083
+      ]
+    ],
+    "sql": "SELECT lev2_name AS region, item_dan_name AS item_dan,\n       SUM(first_purchase_num) AS first_purchase_num_total,\n       SUM(repurchase_in_60_days_num) AS repurchase_in_60_days_num_total,\n       SUM(repurchase_in_60_days_num) / NULLIF(SUM(first_purchase_num),0) AS repurchase_rate_60d\nFROM chatbi.ads_member_first_purchase_new_customer_total_df\nWHERE year='2025' AND month='01' AND item_dan_name IN ('1段','2段','3段')\nGROUP BY lev2_name, item_dan_name\nORDER BY lev2_name, item_dan_name\nLIMIT 500"
+  },
+  {
+    "case": "7-1_heli30_channel",
+    "ok": true,
+    "rows": 9,
+    "columns": [
+      "big_system_channel",
+      "heli30_new_customer_num_total",
+      "heli30_repurchase_60d_total",
+      "heli30_repurchase_rate_60d"
+    ],
+    "preview": [
+      [
+        "LS06354",
+        47.0,
+        2.0,
+        0.0426
+      ],
+      [
+        "LS07589",
+        36.0,
+        4.0,
+        0.1111
+      ]
+    ],
+    "sql": "SELECT big_system_channel_name AS big_system_channel,\n       SUM(heli30_new_customer_num) AS heli30_new_customer_num_total,\n       SUM(heli30_repurchase_in_60_days_num) AS heli30_repurchase_60d_total,\n       SUM(heli30_repurchase_in_60_days_num) / NULLIF(SUM(heli30_new_customer_num),0) AS heli30_repurchase_rate_60d\nFROM chatbi.ads_member_first_purchase_new_customer_total_df\nWHERE year='2025' AND month='01'\nGROUP BY big_system_channel_name\nORDER BY heli30_new_customer_num_total DESC\nLIMIT 500"
+  },
+  {
+    "case": "7-2_heli30_east1",
+    "ok": true,
+    "rows": 9,
+    "columns": [
+      "big_system_channel",
+      "heli30_new_customer_num_total",
+      "heli30_repurchase_60d_total",
+      "heli30_repurchase_rate_60d"
+    ],
+    "preview": [
+      [
+        "LS06354",
+        8.0,
+        1.0,
+        0.125
+      ],
+      [
+        "LS03342",
+        7.0,
+        0.0,
+        0.0
+      ]
+    ],
+    "sql": "SELECT big_system_channel_name AS big_system_channel,\n       SUM(heli30_new_customer_num) AS heli30_new_customer_num_total,\n       SUM(heli30_repurchase_in_60_days_num) AS heli30_repurchase_60d_total,\n       SUM(heli30_repurchase_in_60_days_num) / NULLIF(SUM(heli30_new_customer_num),0) AS heli30_repurchase_rate_60d\nFROM chatbi.ads_member_first_purchase_new_customer_total_df\nWHERE year='2025' AND month='01' AND lev2_name='东一区'\nGROUP BY big_system_channel_name\nORDER BY heli30_new_customer_num_total DESC\nLIMIT 500"
+  },
+  {
+    "case": "8-1_potential_bottom5",
+    "ok": true,
+    "rows": 5,
+    "columns": [
+      "region",
+      "potential_num_total",
+      "potential_to_new_num_total",
+      "potential_to_new_rate"
+    ],
+    "preview": [
+      [
+        "东二区",
+        1181.0,
+        40.0,
+        0.0339
+      ],
+      [
+        "东一区",
+        1990.0,
+        81.0,
+        0.0407
+      ]
+    ],
+    "sql": "SELECT lev2_name AS region,\n       SUM(potential_num) AS potential_num_total,\n       SUM(potential_to_new_num) AS potential_to_new_num_total,\n       SUM(potential_to_new_num) / NULLIF(SUM(potential_num),0) AS potential_to_new_rate\nFROM chatbi.ads_precision_nutrition_potential_total_df\nWHERE year='2025' AND month='01'\nGROUP BY lev2_name\nORDER BY potential_to_new_rate ASC\nLIMIT 5"
+  },
+  {
+    "case": "8-2_potential_east1_sub_region",
+    "ok": true,
+    "rows": 2,
+    "columns": [
+      "sub_region",
+      "potential_num_total",
+      "potential_to_new_num_total",
+      "potential_to_new_rate"
+    ],
+    "preview": [
+      [
+        "苏北",
+        779.0,
+        27.0,
+        0.0347
+      ],
+      [
+        "苏中",
+        1211.0,
+        54.0,
+        0.0446
+      ]
+    ],
+    "sql": "SELECT lev3_name AS sub_region,\n       SUM(potential_num) AS potential_num_total,\n       SUM(potential_to_new_num) AS potential_to_new_num_total,\n       SUM(potential_to_new_num) / NULLIF(SUM(potential_num),0) AS potential_to_new_rate\nFROM chatbi.ads_precision_nutrition_potential_total_df\nWHERE year='2025' AND month='01' AND lev2_name='东一区'\nGROUP BY lev3_name\nORDER BY potential_to_new_rate ASC\nLIMIT 500"
+  },
+  {
+    "case": "9-1_top20_shop",
+    "ok": true,
+    "rows": 20,
+    "columns": [
+      "shop_name",
+      "dealer_name",
+      "city",
+      "guide_name",
+      "shop_sale_qty_total",
+      "shop_sale_amount_total",
+      "gd_amount_total"
+    ],
+    "preview": [
+      [
+        "爱婴坊中南城店",
+        "泰州东华盛商贸有限责任公司(传统渠道)",
+        "320602003",
+        "简宁",
+        52.0,
+        11926.1,
+        11509.122758
+      ],
+      [
+        "爱婴坊泰州泰兴店",
+        "南通腾业商贸有限公司(传统渠道)",
+        "321202064",
+        "王伟然",
+        34.0,
+        9708.6,
+        8336.594144
+      ]
+    ],
+    "sql": "SELECT shop_name, dealer_name, official_city AS city, guide_name,\n       SUM(shop_sale_qty) AS shop_sale_qty_total,\n       SUM(shop_sale_amount) AS shop_sale_amount_total,\n       SUM(gd_amount) AS gd_amount_total\nFROM chatbi.ads_bi_hs_sale_info_df\nWHERE acc_month='2025-01' AND lev2_name='东一区'\nGROUP BY shop_name, dealer_name, official_city, guide_name\nORDER BY shop_sale_amount_total DESC\nLIMIT 20"
+  },
+  {
+    "case": "10-1_guide_shop",
+    "ok": true,
+    "rows": 2,
+    "columns": [
+      "is_guide_shop",
+      "shop_sale_amount_total",
+      "shop_sale_qty_total",
+      "gd_amount_total",
+      "shop_sale_amount_ratio"
+    ],
+    "preview": [
+      [
+        "是",
+        1471473.1,
+        6579.0,
+        1127925.297355,
+        0.7572098866
+      ],
+      [
+        "否",
+        471809.9,
+        2118.0,
+        357958.832989,
+        0.2427901134
+      ]
+    ],
+    "sql": "SELECT is_guide_shop,\n       SUM(shop_sale_amount) AS shop_sale_amount_total,\n       SUM(shop_sale_qty) AS shop_sale_qty_total,\n       SUM(gd_amount) AS gd_amount_total,\n       SUM(shop_sale_amount) / NULLIF(SUM(SUM(shop_sale_amount)) OVER (),0) AS shop_sale_amount_ratio\nFROM chatbi.ads_bi_hs_sale_info_df\nWHERE acc_month='2025-01'\nGROUP BY is_guide_shop\nORDER BY shop_sale_amount_total DESC"
+  },
+  {
+    "case": "12-1_potential_rate_region",
+    "ok": true,
+    "rows": 8,
+    "columns": [
+      "region",
+      "potential_num_total",
+      "potential_to_new_num_total",
+      "potential_to_new_rate"
+    ],
+    "preview": [
+      [
+        "东二区",
+        1181.0,
+        40.0,
+        0.0339
+      ],
+      [
+        "东一区",
+        1990.0,
+        81.0,
+        0.0407
+      ]
+    ],
+    "sql": "SELECT lev2_name AS region,\n       SUM(potential_num) AS potential_num_total,\n       SUM(potential_to_new_num) AS potential_to_new_num_total,\n       SUM(potential_to_new_num) / NULLIF(SUM(potential_num),0) AS potential_to_new_rate\nFROM chatbi.ads_precision_nutrition_potential_total_df\nWHERE year='2025' AND month='01'\nGROUP BY lev2_name\nORDER BY potential_to_new_rate ASC\nLIMIT 500"
+  },
+  {
+    "case": "12-2_bottom3_regions",
+    "ok": true,
+    "rows": 3,
+    "columns": [
+      "region",
+      "potential_num_total",
+      "potential_to_new_num_total",
+      "potential_to_new_rate"
+    ],
+    "preview": [
+      [
+        "东二区",
+        1181.0,
+        40.0,
+        0.0339
+      ],
+      [
+        "东一区",
+        1990.0,
+        81.0,
+        0.0407
+      ]
+    ],
+    "sql": "SELECT lev2_name AS region,\n       SUM(potential_num) AS potential_num_total,\n       SUM(potential_to_new_num) AS potential_to_new_num_total,\n       SUM(potential_to_new_num) / NULLIF(SUM(potential_num),0) AS potential_to_new_rate\nFROM chatbi.ads_precision_nutrition_potential_total_df\nWHERE year='2025' AND month='01'\nGROUP BY lev2_name\nORDER BY potential_to_new_rate ASC\nLIMIT 3"
+  },
+  {
+    "case": "12-3_bottom3_sub_region",
+    "ok": true,
+    "sql": "SELECT p.lev2_name AS region, p.lev3_name AS sub_region,\n       SUM(p.potential_num) AS potential_num_total,\n       SUM(p.potential_to_new_num) AS potential_to_new_num_total,\n       SUM(p.potential_to_new_num) / NULLIF(SUM(p.potential_num),0) AS potential_to_new_rate\nFROM chatbi.ads_precision_nutrition_potential_total_df p\nJOIN (\n  SELECT lev2_name\n  FROM chatbi.ads_precision_nutrition_potential_total_df\n  WHERE year='2025' AND month='01'\n  GROUP BY lev2_name\n  ORDER BY SUM(potential_to_new_num) / NULLIF(SUM(potential_num),0) ASC\n  LIMIT 3\n) b ON p.lev2_name=b.lev2_name\nWHERE p.year='2025' AND p.month='01'\nGROUP BY p.lev2_name, p.lev3_name\nORDER BY potential_to_new_rate ASC\nLIMIT 500",
+    "rows": 5,
+    "columns": [
+      "region",
+      "sub_region",
+      "potential_num_total",
+      "potential_to_new_num_total",
+      "potential_to_new_rate"
+    ],
+    "preview": [
+      [
+        "东二区",
+        "鲁北",
+        1181.0,
+        40.0,
+        0.0339
+      ],
+      [
+        "东一区",
+        "苏北",
+        779.0,
+        27.0,
+        0.0347
+      ]
+    ]
+  },
+  {
+    "case": "12-4_bottom3_channel_filter",
+    "ok": true,
+    "sql": "SELECT p.lev2_name AS region, p.lev3_name AS sub_region, p.big_system_channel_name AS big_system_channel,\n       SUM(p.potential_num) AS potential_num_total,\n       SUM(p.potential_to_new_num) AS potential_to_new_num_total,\n       SUM(p.potential_to_new_num) / NULLIF(SUM(p.potential_num),0) AS potential_to_new_rate\nFROM chatbi.ads_precision_nutrition_potential_total_df p\nJOIN (\n  SELECT lev2_name\n  FROM chatbi.ads_precision_nutrition_potential_total_df\n  WHERE year='2025' AND month='01'\n  GROUP BY lev2_name\n  ORDER BY SUM(potential_to_new_num) / NULLIF(SUM(potential_num),0) ASC\n  LIMIT 3\n) b ON p.lev2_name=b.lev2_name\nWHERE p.year='2025' AND p.month='01'\nGROUP BY p.lev2_name, p.lev3_name, p.big_system_channel_name\nHAVING SUM(p.potential_num) > 50\n   AND SUM(p.potential_to_new_num) / NULLIF(SUM(p.potential_num),0) < 0.05\nORDER BY potential_to_new_rate ASC\nLIMIT 500",
+    "rows": 18,
+    "columns": [
+      "region",
+      "sub_region",
+      "big_system_channel",
+      "potential_num_total",
+      "potential_to_new_num_total",
+      "potential_to_new_rate"
+    ],
+    "preview": [
+      [
+        "东一区",
+        "苏北",
+        "LS06354",
+        229.0,
+        1.0,
+        0.0044
+      ],
+      [
+        "东二区",
+        "鲁北",
+        "CS00019",
+        136.0,
+        1.0,
+        0.0074
+      ]
+    ]
+  }
+]

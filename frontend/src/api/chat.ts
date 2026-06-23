@@ -129,12 +129,23 @@ export const chatApi = {
         }
         if (!resp.ok || !resp.body) {
           const { json } = await readBodyOnce(resp);
-          onError(pickServerMessage(json) || "问数服务暂时不可用，请稍后重试或联系管理员。");
+          const server = pickServerMessage(json);
+          if (server) { onError(server); return; }
+          // 没有可读的业务提示 → 按 HTTP 状态给可定位的兜底，区分限流/网关/服务端异常，
+          // 避免所有失败都笼统显示"服务暂时不可用"（无法定位是限流还是宕机还是超时）。
+          const code = resp.status;
+          let fallback: string;
+          if (code === 429) fallback = "请求过于频繁或服务繁忙，请稍候几秒后重试。";
+          else if (code === 502 || code === 503 || code === 504) fallback = "服务暂时不可用（网关繁忙或超时），请稍后重试。";
+          else if (code >= 500) fallback = "问数服务出现异常，请稍后重试或联系管理员。";
+          else fallback = "问数服务暂时不可用，请稍后重试或联系管理员。";
+          onError(code ? `${fallback}（${code}）` : fallback);
           return;
         }
         const reader = resp.body.getReader();
         const dec = new TextDecoder();
         let buf = "";
+        let settled = false;  // 是否已收到 done/error 事件；用于识别"流被中途掐断"
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
@@ -154,13 +165,17 @@ export const chatApi = {
             try {
               const obj = JSON.parse(data);
               if (event === "stage") onEvent(obj as StageEvent);
-              else if (event === "done") onDone(obj as ChatResult);
-              else if (event === "error") onError(String(obj?.error || "未知错误"));
+              else if (event === "done") { settled = true; onDone(obj as ChatResult); }
+              else if (event === "error") { settled = true; onError(String(obj?.error || "未知错误")); }
             } catch {
               /* ignore non-JSON */
             }
           }
         }
+        // 读到流自然结束却从未收到 done/error：多半是中间代理把长连接掐断
+        // （读超时 / 网关重启）。此前会让该轮永远 pending（一直转圈、无任何反馈）。
+        // 这里明确报错，让用户可重试，杜绝"卡死"。
+        if (!settled) onError("连接已中断，请稍后重试（若多次出现请联系管理员）。");
       } catch (e: any) {
         if (e?.name === "AbortError") return;
         onError(friendlyError(e));

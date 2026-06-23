@@ -1,0 +1,2726 @@
+[
+  {
+    "id": 1,
+    "turn": 1,
+    "question": "2025年1月各大区门店销售金额、门店销售目标和销售达成率分别是多少？按达成率从低到高排序。",
+    "http": 200,
+    "conversation_id": "b006fb37272f4760a67502e3ba9069c4",
+    "trace_id": "0834e21163ce405ebf2b68dbf64c85fb",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 8,
+    "sql": "SELECT `lev2_name` AS `region`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`,\n       SUM(shop_sale_amount) AS `shop_sale_amount_actual_total`,\n       SUM(shop_sale_target) AS `shop_sale_target_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `shop_sale_achievement_rate` ASC\nLIMIT 500",
+    "narrative": "门店销售达成率 已返回 8 条记录。",
+    "display_columns": [
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_achievement_rate",
+        "label": "门店销售达成率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_amount_actual_total",
+        "label": "门店销售实绩（目标表口径）",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_target_total",
+        "label": "门店销售目标",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "东二区",
+        "84.65%",
+        "18.64 万元",
+        "22.02 万元"
+      ],
+      [
+        "北一区",
+        "85.69%",
+        "62.66 万元",
+        "73.13 万元"
+      ],
+      [
+        "东一区",
+        "86.06%",
+        "31.42 万元",
+        "36.51 万元"
+      ]
+    ],
+    "plan": {
+      "metric": "shop_sale_achievement_rate",
+      "extra_metrics": [
+        "shop_sale_amount_actual_total",
+        "shop_sale_target_total"
+      ],
+      "table": "ads_bi_month_shop_item_dan_target_summary_df",
+      "group_by": [
+        "region"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [
+        {
+          "field": "shop_sale_achievement_rate",
+          "dir": "asc"
+        }
+      ],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 1,
+    "turn": 2,
+    "question": "只看东一区，拆到省区层级。",
+    "http": 200,
+    "conversation_id": "b006fb37272f4760a67502e3ba9069c4",
+    "trace_id": "a0691b0d5eaf4b60ac49f87f0c65338b",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 2,
+    "sql": "SELECT `lev3_name` AS `sub_region`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`,\n       SUM(shop_sale_amount) AS `shop_sale_amount_actual_total`,\n       SUM(shop_sale_target) AS `shop_sale_target_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev3_name`\nORDER BY `shop_sale_achievement_rate` ASC\nLIMIT 500",
+    "narrative": "门店销售达成率 已返回 2 条记录。",
+    "display_columns": [
+      {
+        "key": "sub_region",
+        "label": "省区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_achievement_rate",
+        "label": "门店销售达成率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_amount_actual_total",
+        "label": "门店销售实绩（目标表口径）",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_target_total",
+        "label": "门店销售目标",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "苏北",
+        "85.60%",
+        "10.85 万元",
+        "12.68 万元"
+      ],
+      [
+        "苏中",
+        "86.30%",
+        "20.56 万元",
+        "23.83 万元"
+      ]
+    ],
+    "plan": {
+      "metric": "shop_sale_achievement_rate",
+      "extra_metrics": [
+        "shop_sale_amount_actual_total",
+        "shop_sale_target_total"
+      ],
+      "table": "ads_bi_month_shop_item_dan_target_summary_df",
+      "group_by": [
+        "sub_region"
+      ],
+      "filters": [
+        {
+          "dimension": "region",
+          "op": "eq",
+          "values": [
+            "东一区"
+          ],
+          "raw": ""
+        }
+      ],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [
+        {
+          "field": "shop_sale_achievement_rate",
+          "dir": "asc"
+        }
+      ],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 2,
+    "turn": 1,
+    "question": "2025年1月各大区过单金额、过单目标和过单达成率是多少？",
+    "http": 200,
+    "conversation_id": "d3a156b88db64f379675f343e506ec9c",
+    "trace_id": "5c44a1adb1244ca58fea78a817012400",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 8,
+    "sql": "SELECT `lev2_name` AS `region`,\n       SUM(gd_amount) / NULLIF(SUM(gd_target), 0) AS `gd_achievement_rate`,\n       SUM(gd_amount) AS `gd_amount_actual_total`,\n       SUM(gd_target) AS `gd_target_total`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `gd_achievement_rate` DESC\nLIMIT 500",
+    "narrative": "过单达成率 已返回 8 条记录。",
+    "display_columns": [
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "gd_achievement_rate",
+        "label": "过单达成率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      },
+      {
+        "key": "gd_amount_actual_total",
+        "label": "过单实绩（目标表口径）",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "gd_target_total",
+        "label": "过单目标",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_achievement_rate",
+        "label": "门店销售达成率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "东一区",
+        "92.84%",
+        "24.96 万元",
+        "26.88 万元",
+        "86.06%"
+      ],
+      [
+        "中一区",
+        "92.53%",
+        "14.05 万元",
+        "15.19 万元",
+        "90.39%"
+      ],
+      [
+        "直辖区",
+        "92.35%",
+        "8.27 万元",
+        "8.96 万元",
+        "90.83%"
+      ]
+    ],
+    "plan": {
+      "metric": "gd_achievement_rate",
+      "extra_metrics": [
+        "gd_amount_actual_total",
+        "gd_target_total",
+        "shop_sale_achievement_rate"
+      ],
+      "table": "ads_bi_month_shop_item_dan_target_summary_df",
+      "group_by": [
+        "region"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 2,
+    "turn": 2,
+    "question": "把东一区按渠道拆开看。",
+    "http": 200,
+    "conversation_id": "d3a156b88db64f379675f343e506ec9c",
+    "trace_id": "8b6454db294447b498951bc353431a32",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 9,
+    "sql": "SELECT `big_system_channel_name` AS `big_system_channel`,\n       SUM(gd_amount) / NULLIF(SUM(gd_target), 0) AS `gd_achievement_rate`,\n       SUM(gd_amount) AS `gd_amount_actual_total`,\n       SUM(gd_target) AS `gd_target_total`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `big_system_channel_name`\nORDER BY `gd_achievement_rate` DESC\nLIMIT 500",
+    "narrative": "过单达成率 已返回 9 条记录。",
+    "display_columns": [
+      {
+        "key": "big_system_channel",
+        "label": "大系统渠道",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "gd_achievement_rate",
+        "label": "过单达成率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      },
+      {
+        "key": "gd_amount_actual_total",
+        "label": "过单实绩（目标表口径）",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "gd_target_total",
+        "label": "过单目标",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_achievement_rate",
+        "label": "门店销售达成率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "CS01990",
+        "96.93%",
+        "2.87 万元",
+        "2.96 万元",
+        "81.91%"
+      ],
+      [
+        "LS07589",
+        "95.73%",
+        "4.61 万元",
+        "4.81 万元",
+        "88.49%"
+      ],
+      [
+        "LS03342",
+        "94.74%",
+        "4.02 万元",
+        "4.25 万元",
+        "83.71%"
+      ]
+    ],
+    "plan": {
+      "metric": "gd_achievement_rate",
+      "extra_metrics": [
+        "gd_amount_actual_total",
+        "gd_target_total",
+        "shop_sale_achievement_rate"
+      ],
+      "table": "ads_bi_month_shop_item_dan_target_summary_df",
+      "group_by": [
+        "big_system_channel"
+      ],
+      "filters": [
+        {
+          "dimension": "region",
+          "op": "eq",
+          "values": [
+            "东一区"
+          ],
+          "raw": ""
+        }
+      ],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 3,
+    "turn": 1,
+    "question": "2025年1月各大区终端销售金额和还原过单金额差异是多少？差异金额最大的前10个大区列出来。",
+    "http": 200,
+    "conversation_id": "ecef298a75f94f8681e8f1c34839df68",
+    "trace_id": "8908cfb8db3a42438d065566d42d918c",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 8,
+    "sql": "SELECT `lev2_name` AS `region`,\n       SUM(reduction_gd_sale_amount) AS `reduction_gd_sale_amount_total`,\n       SUM(terminal_sale_amount) AS `terminal_sale_amount_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `reduction_gd_sale_amount_total` DESC\nLIMIT 10",
+    "narrative": "还原过单金额（不含货补） 已返回 8 条记录。",
+    "display_columns": [
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "reduction_gd_sale_amount_total",
+        "label": "还原过单金额（不含货补）",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "terminal_sale_amount_total",
+        "label": "终端销售额",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "北一区",
+        "46.92 万元",
+        "62.66 万元"
+      ],
+      [
+        "东一区",
+        "24.96 万元",
+        "31.42 万元"
+      ],
+      [
+        "中二区",
+        "15.21 万元",
+        "17.54 万元"
+      ]
+    ],
+    "plan": {
+      "metric": "reduction_gd_sale_amount_total",
+      "extra_metrics": [
+        "terminal_sale_amount_total"
+      ],
+      "table": "ads_bi_month_shop_item_dan_summary_df",
+      "group_by": [
+        "region"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "rank",
+      "order_by": [
+        {
+          "field": "reduction_gd_sale_amount_total",
+          "dir": "desc"
+        }
+      ],
+      "limit": 10,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 3,
+    "turn": 2,
+    "question": "继续下钻到省区。",
+    "http": 200,
+    "conversation_id": "ecef298a75f94f8681e8f1c34839df68",
+    "trace_id": "44e7606254a04cc98ea08b8b277f382c",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 10,
+    "sql": "SELECT `lev2_name` AS `region`,\n       `lev3_name` AS `sub_region`,\n       SUM(reduction_gd_sale_amount) AS `reduction_gd_sale_amount_total`,\n       SUM(terminal_sale_amount) AS `terminal_sale_amount_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`, `lev3_name`\nORDER BY `reduction_gd_sale_amount_total` DESC\nLIMIT 10",
+    "narrative": "还原过单金额（不含货补） 已返回 10 条记录。",
+    "display_columns": [
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "sub_region",
+        "label": "省区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "reduction_gd_sale_amount_total",
+        "label": "还原过单金额（不含货补）",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "terminal_sale_amount_total",
+        "label": "终端销售额",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "北一区",
+        "黑龙江",
+        "20.25 万元",
+        "28.54 万元"
+      ],
+      [
+        "北一区",
+        "吉林",
+        "18.24 万元",
+        "24.34 万元"
+      ],
+      [
+        "东一区",
+        "苏中",
+        "16.13 万元",
+        "20.56 万元"
+      ]
+    ],
+    "plan": {
+      "metric": "reduction_gd_sale_amount_total",
+      "extra_metrics": [
+        "terminal_sale_amount_total"
+      ],
+      "table": "ads_bi_month_shop_item_dan_summary_df",
+      "group_by": [
+        "region",
+        "sub_region"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "rank",
+      "order_by": [
+        {
+          "field": "reduction_gd_sale_amount_total",
+          "dir": "desc"
+        }
+      ],
+      "limit": 10,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 4,
+    "turn": 1,
+    "question": "2025年1月东一区各产品系列的终端销售金额占比是多少？",
+    "http": 200,
+    "conversation_id": "c8887277033349ab9c02cd9c32a62bb8",
+    "trace_id": "bffa0f47f1cc4587b35f7a4741b91ddf",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 9,
+    "sql": "SELECT `item_series_new_name` AS `item_series`,\n       SUM(terminal_sale_amount) AS `terminal_sale_amount_total`,\n       SUM(terminal_sale_amount) / NULLIF(SUM(SUM(terminal_sale_amount)) OVER (), 0) AS `terminal_sale_amount_total_ratio`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `item_series_new_name`\nORDER BY `terminal_sale_amount_total` DESC\nLIMIT 500",
+    "narrative": "终端销售额 已返回 9 条记录。",
+    "display_columns": [
+      {
+        "key": "item_series",
+        "label": "产品系列",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "terminal_sale_amount_total",
+        "label": "终端销售额",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "terminal_sale_amount_total_ratio",
+        "label": "终端销售额 占比",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "臻爱飞帆",
+        "5.90 万元",
+        "18.78%"
+      ],
+      [
+        "星飞帆卓耀铂金（有机A2 β-酪蛋白）",
+        "5.37 万元",
+        "17.09%"
+      ],
+      [
+        "卓睿",
+        "4.68 万元",
+        "14.89%"
+      ]
+    ],
+    "plan": {
+      "metric": "terminal_sale_amount_total",
+      "extra_metrics": [],
+      "table": "ads_bi_month_shop_item_dan_summary_df",
+      "group_by": [
+        "item_series"
+      ],
+      "filters": [
+        {
+          "dimension": "region",
+          "op": "eq",
+          "values": [
+            "东一区"
+          ],
+          "raw": ""
+        }
+      ],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "ratio",
+      "order_by": [],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 4,
+    "turn": 2,
+    "question": "只看3段。",
+    "http": 200,
+    "conversation_id": "c8887277033349ab9c02cd9c32a62bb8",
+    "trace_id": "4ad5b038de00408e8358d34a8c292dd7",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 7,
+    "sql": "SELECT `item_series_new_name` AS `item_series`,\n       SUM(terminal_sale_amount) AS `terminal_sale_amount_total`,\n       SUM(terminal_sale_amount) / NULLIF(SUM(SUM(terminal_sale_amount)) OVER (), 0) AS `terminal_sale_amount_total_ratio`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `item_dan_name` = '3段'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `item_series_new_name`\nORDER BY `terminal_sale_amount_total` DESC\nLIMIT 500",
+    "narrative": "终端销售额 已返回 7 条记录。",
+    "display_columns": [
+      {
+        "key": "item_series",
+        "label": "产品系列",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "terminal_sale_amount_total",
+        "label": "终端销售额",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "terminal_sale_amount_total_ratio",
+        "label": "终端销售额 占比",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "卓睿",
+        "2.95 万元",
+        "26.29%"
+      ],
+      [
+        "星飞帆卓耀铂金（有机A2 β-酪蛋白）",
+        "2.43 万元",
+        "21.64%"
+      ],
+      [
+        "星飞帆经典1-3段",
+        "1.69 万元",
+        "15.11%"
+      ]
+    ],
+    "plan": {
+      "metric": "terminal_sale_amount_total",
+      "extra_metrics": [],
+      "table": "ads_bi_month_shop_item_dan_summary_df",
+      "group_by": [
+        "item_series"
+      ],
+      "filters": [
+        {
+          "dimension": "region",
+          "op": "eq",
+          "values": [
+            "东一区"
+          ],
+          "raw": ""
+        },
+        {
+          "dimension": "item_dan",
+          "op": "eq",
+          "values": [
+            "3段"
+          ],
+          "raw": ""
+        }
+      ],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "ratio",
+      "order_by": [],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 5,
+    "turn": 1,
+    "question": "2025年1月各段位的终端销售金额和销售占比是多少？",
+    "http": 200,
+    "conversation_id": "dbb41f4fe646402fa915bb7715b8d348",
+    "trace_id": "3c2a87ace064440599bf3405c11eaa89",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 6,
+    "sql": "SELECT `item_dan_name` AS `item_dan`,\n       SUM(terminal_sale_amount) AS `terminal_sale_amount_total`,\n       SUM(terminal_sale_amount) / NULLIF(SUM(SUM(terminal_sale_amount)) OVER (), 0) AS `terminal_sale_amount_total_ratio`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `item_dan_name`\nORDER BY `terminal_sale_amount_total` DESC\nLIMIT 500",
+    "narrative": "终端销售额 已返回 6 条记录。",
+    "display_columns": [
+      {
+        "key": "item_dan",
+        "label": "段位",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "terminal_sale_amount_total",
+        "label": "终端销售额",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "terminal_sale_amount_total_ratio",
+        "label": "终端销售额 占比",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "1段",
+        "62.66 万元",
+        "32.24%"
+      ],
+      [
+        "3段",
+        "61.96 万元",
+        "31.88%"
+      ],
+      [
+        "2段",
+        "57.41 万元",
+        "29.54%"
+      ]
+    ],
+    "plan": {
+      "metric": "terminal_sale_amount_total",
+      "extra_metrics": [],
+      "table": "ads_bi_month_shop_item_dan_summary_df",
+      "group_by": [
+        "item_dan"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "ratio",
+      "order_by": [],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 5,
+    "turn": 2,
+    "question": "按大区拆开看。",
+    "http": 200,
+    "conversation_id": "dbb41f4fe646402fa915bb7715b8d348",
+    "trace_id": "59cbcd978d98435ab907d80988182a6d",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 48,
+    "sql": "SELECT `item_dan_name` AS `item_dan`,\n       `lev2_name` AS `region`,\n       SUM(terminal_sale_amount) AS `terminal_sale_amount_total`,\n       SUM(terminal_sale_amount) / NULLIF(SUM(SUM(terminal_sale_amount)) OVER (), 0) AS `terminal_sale_amount_total_ratio`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `item_dan_name`, `lev2_name`\nORDER BY `terminal_sale_amount_total` DESC\nLIMIT 500",
+    "narrative": "终端销售额 已返回 48 条记录。",
+    "display_columns": [
+      {
+        "key": "item_dan",
+        "label": "段位",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "terminal_sale_amount_total",
+        "label": "终端销售额",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "terminal_sale_amount_total_ratio",
+        "label": "终端销售额 占比",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "1段",
+        "北一区",
+        "23.41 万元",
+        "12.05%"
+      ],
+      [
+        "3段",
+        "北一区",
+        "18.95 万元",
+        "9.75%"
+      ],
+      [
+        "2段",
+        "北一区",
+        "16.16 万元",
+        "8.31%"
+      ]
+    ],
+    "plan": {
+      "metric": "terminal_sale_amount_total",
+      "extra_metrics": [],
+      "table": "ads_bi_month_shop_item_dan_summary_df",
+      "group_by": [
+        "item_dan",
+        "region"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "ratio",
+      "order_by": [],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 6,
+    "turn": 1,
+    "question": "2025年1月各大区首购人数、60天复购人数和60天复购率是多少？按复购率从高到低排序。",
+    "http": 200,
+    "conversation_id": "77e831960355459ab013b4658d5d994f",
+    "trace_id": "a0ad4ef9b05a4f87ac494bcce1a19930",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 8,
+    "sql": "SELECT `lev2_name` AS `region`,\n       SUM(repurchase_in_60_days_num) / NULLIF(SUM(first_purchase_num), 0) AS `repurchase_rate_60d`,\n       SUM(repurchase_in_60_days_num) AS `repurchase_in_60_days_num_total`,\n       SUM(first_purchase_num) AS `first_purchase_num_total`\nFROM `chatbi`.`ads_member_first_purchase_new_customer_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `repurchase_rate_60d` DESC\nLIMIT 500",
+    "narrative": "60天复购率 已返回 8 条记录。",
+    "display_columns": [
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "repurchase_rate_60d",
+        "label": "60天复购率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      },
+      {
+        "key": "repurchase_in_60_days_num_total",
+        "label": "60天复购人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "first_purchase_num_total",
+        "label": "首购人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "南一区",
+        "24.68%",
+        "38",
+        "154"
+      ],
+      [
+        "西一区",
+        "24.00%",
+        "36",
+        "150"
+      ],
+      [
+        "北一区",
+        "22.09%",
+        "110",
+        "498"
+      ]
+    ],
+    "plan": {
+      "metric": "repurchase_rate_60d",
+      "extra_metrics": [
+        "repurchase_in_60_days_num_total",
+        "first_purchase_num_total"
+      ],
+      "table": "ads_member_first_purchase_new_customer_total_df",
+      "group_by": [
+        "region"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [
+        {
+          "field": "repurchase_rate_60d",
+          "dir": "desc"
+        }
+      ],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 6,
+    "turn": 2,
+    "question": "只看1段、2段、3段分别是多少。",
+    "http": 200,
+    "conversation_id": "77e831960355459ab013b4658d5d994f",
+    "trace_id": "1c79ef25cafb4f8c9f65a9e35aa1ebc7",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 8,
+    "sql": "SELECT `lev2_name` AS `region`,\n       SUM(repurchase_in_60_days_num) / NULLIF(SUM(first_purchase_num), 0) AS `repurchase_rate_60d`,\n       SUM(repurchase_in_60_days_num) AS `repurchase_in_60_days_num_total`,\n       SUM(first_purchase_num) AS `first_purchase_num_total`\nFROM `chatbi`.`ads_member_first_purchase_new_customer_total_df`\nWHERE `item_dan_name` = '1段'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `repurchase_rate_60d` DESC\nLIMIT 500",
+    "narrative": "60天复购率 已返回 8 条记录。",
+    "display_columns": [
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "repurchase_rate_60d",
+        "label": "60天复购率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      },
+      {
+        "key": "repurchase_in_60_days_num_total",
+        "label": "60天复购人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "first_purchase_num_total",
+        "label": "首购人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "南一区",
+        "31.71%",
+        "13",
+        "41"
+      ],
+      [
+        "西一区",
+        "25.93%",
+        "14",
+        "54"
+      ],
+      [
+        "东一区",
+        "24.32%",
+        "18",
+        "74"
+      ]
+    ],
+    "plan": {
+      "metric": "repurchase_rate_60d",
+      "extra_metrics": [
+        "repurchase_in_60_days_num_total",
+        "first_purchase_num_total"
+      ],
+      "table": "ads_member_first_purchase_new_customer_total_df",
+      "group_by": [
+        "region"
+      ],
+      "filters": [
+        {
+          "dimension": "item_dan",
+          "op": "eq",
+          "values": [
+            "1段"
+          ],
+          "raw": ""
+        }
+      ],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [
+        {
+          "field": "repurchase_rate_60d",
+          "dir": "desc"
+        }
+      ],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 7,
+    "turn": 1,
+    "question": "2025年1月各渠道鹤礼3.0新客数、鹤礼3.060天复购数和复购率是多少？",
+    "http": 200,
+    "conversation_id": "99be0444cf0f427baca9030fa566e2e3",
+    "trace_id": "39db6548677a463db7d8bfe1b92c697c",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 9,
+    "sql": "SELECT `big_system_channel_name` AS `big_system_channel`,\n       SUM(heli30_new_customer_num) AS `heli30_new_customer_num_total`,\n       SUM(repurchase_in_60_days_num) AS `repurchase_in_60_days_num_total`,\n       SUM(first_purchase_num) AS `first_purchase_num_total`,\n       SUM(repurchase_in_60_days_num) / NULLIF(SUM(first_purchase_num), 0) AS `repurchase_rate_60d`\nFROM `chatbi`.`ads_member_first_purchase_new_customer_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `big_system_channel_name`\nORDER BY `heli30_new_customer_num_total` DESC\nLIMIT 500",
+    "narrative": "鹤礼3.0新客数 已返回 9 条记录。",
+    "display_columns": [
+      {
+        "key": "big_system_channel",
+        "label": "大系统渠道",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "heli30_new_customer_num_total",
+        "label": "鹤礼3.0新客数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "repurchase_in_60_days_num_total",
+        "label": "60天复购人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "first_purchase_num_total",
+        "label": "首购人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "repurchase_rate_60d",
+        "label": "60天复购率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "LS06354",
+        "47",
+        "83",
+        "346",
+        "23.99%"
+      ],
+      [
+        "LS07589",
+        "36",
+        "57",
+        "298",
+        "19.13%"
+      ],
+      [
+        "LS08553",
+        "29",
+        "59",
+        "253",
+        "23.32%"
+      ]
+    ],
+    "plan": {
+      "metric": "heli30_new_customer_num_total",
+      "extra_metrics": [
+        "repurchase_in_60_days_num_total",
+        "first_purchase_num_total",
+        "repurchase_rate_60d"
+      ],
+      "table": "ads_member_first_purchase_new_customer_total_df",
+      "group_by": [
+        "big_system_channel"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 7,
+    "turn": 2,
+    "question": "东一区表现怎么样？",
+    "http": 200,
+    "conversation_id": "99be0444cf0f427baca9030fa566e2e3",
+    "trace_id": "db1573418de34a8d9f3fec5698e7d38d",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 9,
+    "sql": "SELECT `big_system_channel_name` AS `big_system_channel`,\n       SUM(heli30_new_customer_num) AS `heli30_new_customer_num_total`,\n       SUM(repurchase_in_60_days_num) AS `repurchase_in_60_days_num_total`,\n       SUM(first_purchase_num) AS `first_purchase_num_total`,\n       SUM(repurchase_in_60_days_num) / NULLIF(SUM(first_purchase_num), 0) AS `repurchase_rate_60d`\nFROM `chatbi`.`ads_member_first_purchase_new_customer_total_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `big_system_channel_name`\nORDER BY `heli30_new_customer_num_total` DESC\nLIMIT 500",
+    "narrative": "鹤礼3.0新客数 已返回 9 条记录。",
+    "display_columns": [
+      {
+        "key": "big_system_channel",
+        "label": "大系统渠道",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "heli30_new_customer_num_total",
+        "label": "鹤礼3.0新客数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "repurchase_in_60_days_num_total",
+        "label": "60天复购人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "first_purchase_num_total",
+        "label": "首购人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "repurchase_rate_60d",
+        "label": "60天复购率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "LS06354",
+        "8",
+        "15",
+        "75",
+        "20.00%"
+      ],
+      [
+        "LS03342",
+        "7",
+        "11",
+        "49",
+        "22.45%"
+      ],
+      [
+        "LS07589",
+        "6",
+        "12",
+        "52",
+        "23.08%"
+      ]
+    ],
+    "plan": {
+      "metric": "heli30_new_customer_num_total",
+      "extra_metrics": [
+        "repurchase_in_60_days_num_total",
+        "first_purchase_num_total",
+        "repurchase_rate_60d"
+      ],
+      "table": "ads_member_first_purchase_new_customer_total_df",
+      "group_by": [
+        "big_system_channel"
+      ],
+      "filters": [
+        {
+          "dimension": "region",
+          "op": "eq",
+          "values": [
+            "东一区"
+          ],
+          "raw": ""
+        }
+      ],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 8,
+    "turn": 1,
+    "question": "2025年1月各大区精准潜客人数、转新人数和转新率是多少？转新率最低的5个大区列出来。",
+    "http": 200,
+    "conversation_id": "0bea1575041c4d0f96dedd1750ce1e34",
+    "trace_id": "37e622c4431b42d5a960f0f1ff4ef571",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 8,
+    "sql": "SELECT `lev2_name` AS `region`,\n       SUM(potential_num) AS `potential_num_total`,\n       SUM(potential_to_new_num) AS `potential_to_new_num_total`\nFROM `chatbi`.`ads_precision_nutrition_potential_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `potential_num_total` DESC\nLIMIT 500",
+    "narrative": "精准潜客人数 已返回 8 条记录。",
+    "display_columns": [
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "potential_num_total",
+        "label": "精准潜客人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "potential_to_new_num_total",
+        "label": "潜客转新客人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "北一区",
+        "3,948",
+        "205"
+      ],
+      [
+        "东一区",
+        "1,990",
+        "81"
+      ],
+      [
+        "中一区",
+        "1,211",
+        "58"
+      ]
+    ],
+    "plan": {
+      "metric": "potential_num_total",
+      "extra_metrics": [
+        "potential_to_new_num_total"
+      ],
+      "table": "ads_precision_nutrition_potential_total_df",
+      "group_by": [
+        "region"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 8,
+    "turn": 2,
+    "question": "下钻到省区，并只看东一区。",
+    "http": 200,
+    "conversation_id": "0bea1575041c4d0f96dedd1750ce1e34",
+    "trace_id": "3451837d420d434c887d5877defc7a3f",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 2,
+    "sql": "SELECT `lev3_name` AS `sub_region`,\n       SUM(potential_num) AS `potential_num_total`,\n       SUM(potential_to_new_num) AS `potential_to_new_num_total`\nFROM `chatbi`.`ads_precision_nutrition_potential_total_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev3_name`\nORDER BY `potential_num_total` DESC\nLIMIT 500",
+    "narrative": "精准潜客人数 已返回 2 条记录。",
+    "display_columns": [
+      {
+        "key": "sub_region",
+        "label": "省区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "potential_num_total",
+        "label": "精准潜客人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "potential_to_new_num_total",
+        "label": "潜客转新客人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "苏中",
+        "1,211",
+        "54"
+      ],
+      [
+        "苏北",
+        "779",
+        "27"
+      ]
+    ],
+    "plan": {
+      "metric": "potential_num_total",
+      "extra_metrics": [
+        "potential_to_new_num_total"
+      ],
+      "table": "ads_precision_nutrition_potential_total_df",
+      "group_by": [
+        "sub_region"
+      ],
+      "filters": [
+        {
+          "dimension": "region",
+          "op": "eq",
+          "values": [
+            "东一区"
+          ],
+          "raw": ""
+        }
+      ],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 9,
+    "turn": 1,
+    "question": "2025年1月东一区销售金额最高的20个门店是哪些？列出门店名称、经销商、城市、导购姓名、销售数量、销售金额和过单金额。",
+    "http": 200,
+    "conversation_id": "b6dc7f0b3a604608948f3a4cf4ba9384",
+    "trace_id": "b87803dd813644938df7f8a039f2feff",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 1,
+    "sql": "SELECT SUM(shop_sale_qty) AS `shop_sale_qty_total`,\n       SUM(gd_amount) AS `gd_amount_total`\nFROM `chatbi`.`ads_bi_hs_sale_info_df`\nWHERE `lev2_name` = '东一区'\n  AND `acc_month` IN ('2025-01')\nLIMIT 500",
+    "narrative": "门店销售件数 已返回 1 条记录。",
+    "display_columns": [
+      {
+        "key": "shop_sale_qty_total",
+        "label": "门店销售件数",
+        "kind": "metric",
+        "unit": "件",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "gd_amount_total",
+        "label": "过单金额（明细）",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "1,416",
+        "24.96 万元"
+      ]
+    ],
+    "plan": {
+      "metric": "shop_sale_qty_total",
+      "extra_metrics": [
+        "gd_amount_total"
+      ],
+      "table": "ads_bi_hs_sale_info_df",
+      "group_by": [],
+      "filters": [
+        {
+          "dimension": "region",
+          "op": "eq",
+          "values": [
+            "东一区"
+          ],
+          "raw": ""
+        }
+      ],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 10,
+    "turn": 1,
+    "question": "2025年1月有导门店和非导门店的销售金额、销售数量、过单金额分别是多少？销售金额占比分别是多少？",
+    "http": 200,
+    "conversation_id": "c66477c19c1c4bd6bb7fda7bb61df9a1",
+    "trace_id": "d50e396aed324041a37433778bd65e3c",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 1,
+    "sql": "SELECT SUM(shop_sale_qty) AS `shop_sale_qty_total`,\n       SUM(gd_amount) AS `gd_amount_total`\nFROM `chatbi`.`ads_bi_hs_sale_info_df`\nWHERE `acc_month` IN ('2025-01')\nLIMIT 500",
+    "narrative": "门店销售件数 已返回 1 条记录。",
+    "display_columns": [
+      {
+        "key": "shop_sale_qty_total",
+        "label": "门店销售件数",
+        "kind": "metric",
+        "unit": "件",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "gd_amount_total",
+        "label": "过单金额（明细）",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "8,697",
+        "148.59 万元"
+      ]
+    ],
+    "plan": {
+      "metric": "shop_sale_qty_total",
+      "extra_metrics": [
+        "gd_amount_total"
+      ],
+      "table": "ads_bi_hs_sale_info_df",
+      "group_by": [],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "ratio",
+      "order_by": [],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 11,
+    "turn": 1,
+    "question": "2025年1月各大区门店销售金额、门店销售目标和销售达成率是多少？按达成率从低到高排序。",
+    "http": 200,
+    "conversation_id": "30d20469fbb44705aeb7942d83415d0c",
+    "trace_id": "8cd8d04264414a1197a45dfe3beebafa",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 8,
+    "sql": "SELECT `lev2_name` AS `region`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`,\n       SUM(shop_sale_amount) AS `shop_sale_amount_actual_total`,\n       SUM(shop_sale_target) AS `shop_sale_target_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `shop_sale_achievement_rate` ASC\nLIMIT 500",
+    "narrative": "门店销售达成率 已返回 8 条记录。",
+    "display_columns": [
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_achievement_rate",
+        "label": "门店销售达成率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_amount_actual_total",
+        "label": "门店销售实绩（目标表口径）",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_target_total",
+        "label": "门店销售目标",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "东二区",
+        "84.65%",
+        "18.64 万元",
+        "22.02 万元"
+      ],
+      [
+        "北一区",
+        "85.69%",
+        "62.66 万元",
+        "73.13 万元"
+      ],
+      [
+        "东一区",
+        "86.06%",
+        "31.42 万元",
+        "36.51 万元"
+      ]
+    ],
+    "plan": {
+      "metric": "shop_sale_achievement_rate",
+      "extra_metrics": [
+        "shop_sale_amount_actual_total",
+        "shop_sale_target_total"
+      ],
+      "table": "ads_bi_month_shop_item_dan_target_summary_df",
+      "group_by": [
+        "region"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [
+        {
+          "field": "shop_sale_achievement_rate",
+          "dir": "asc"
+        }
+      ],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 11,
+    "turn": 2,
+    "question": "只看东一区，拆到省区层级。",
+    "http": 200,
+    "conversation_id": "30d20469fbb44705aeb7942d83415d0c",
+    "trace_id": "55a7aa9750994a1abbd0d5cbc2a64bed",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 2,
+    "sql": "SELECT `lev3_name` AS `sub_region`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`,\n       SUM(shop_sale_amount) AS `shop_sale_amount_actual_total`,\n       SUM(shop_sale_target) AS `shop_sale_target_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev3_name`\nORDER BY `shop_sale_achievement_rate` ASC\nLIMIT 500",
+    "narrative": "门店销售达成率 已返回 2 条记录。",
+    "display_columns": [
+      {
+        "key": "sub_region",
+        "label": "省区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_achievement_rate",
+        "label": "门店销售达成率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_amount_actual_total",
+        "label": "门店销售实绩（目标表口径）",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_target_total",
+        "label": "门店销售目标",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "苏北",
+        "85.60%",
+        "10.85 万元",
+        "12.68 万元"
+      ],
+      [
+        "苏中",
+        "86.30%",
+        "20.56 万元",
+        "23.83 万元"
+      ]
+    ],
+    "plan": {
+      "metric": "shop_sale_achievement_rate",
+      "extra_metrics": [
+        "shop_sale_amount_actual_total",
+        "shop_sale_target_total"
+      ],
+      "table": "ads_bi_month_shop_item_dan_target_summary_df",
+      "group_by": [
+        "sub_region"
+      ],
+      "filters": [
+        {
+          "dimension": "region",
+          "op": "eq",
+          "values": [
+            "东一区"
+          ],
+          "raw": ""
+        }
+      ],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [
+        {
+          "field": "shop_sale_achievement_rate",
+          "dir": "asc"
+        }
+      ],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 11,
+    "turn": 3,
+    "question": "继续按大系统渠道拆开看。",
+    "http": 200,
+    "conversation_id": "30d20469fbb44705aeb7942d83415d0c",
+    "trace_id": "296d605aba5d44949cfd52e57d7c4238",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 18,
+    "sql": "SELECT `lev3_name` AS `sub_region`,\n       `big_system_channel_name` AS `big_system_channel`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`,\n       SUM(shop_sale_amount) AS `shop_sale_amount_actual_total`,\n       SUM(shop_sale_target) AS `shop_sale_target_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev3_name`, `big_system_channel_name`\nORDER BY `shop_sale_achievement_rate` ASC\nLIMIT 500",
+    "narrative": "门店销售达成率 已返回 18 条记录。",
+    "display_columns": [
+      {
+        "key": "sub_region",
+        "label": "省区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "big_system_channel",
+        "label": "大系统渠道",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_achievement_rate",
+        "label": "门店销售达成率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_amount_actual_total",
+        "label": "门店销售实绩（目标表口径）",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_target_total",
+        "label": "门店销售目标",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "苏中",
+        "LS03342",
+        "79.66%",
+        "2.78 万元",
+        "3.49 万元"
+      ],
+      [
+        "苏中",
+        "CS01990",
+        "81.18%",
+        "2.09 万元",
+        "2.58 万元"
+      ],
+      [
+        "苏中",
+        "LS08553",
+        "81.61%",
+        "1.17 万元",
+        "1.44 万元"
+      ]
+    ],
+    "plan": {
+      "metric": "shop_sale_achievement_rate",
+      "extra_metrics": [
+        "shop_sale_amount_actual_total",
+        "shop_sale_target_total"
+      ],
+      "table": "ads_bi_month_shop_item_dan_target_summary_df",
+      "group_by": [
+        "sub_region",
+        "big_system_channel"
+      ],
+      "filters": [
+        {
+          "dimension": "region",
+          "op": "eq",
+          "values": [
+            "东一区"
+          ],
+          "raw": ""
+        }
+      ],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [
+        {
+          "field": "shop_sale_achievement_rate",
+          "dir": "asc"
+        }
+      ],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 11,
+    "turn": 4,
+    "question": "把达成率低于90%的省区和渠道列出来。",
+    "http": 200,
+    "conversation_id": "30d20469fbb44705aeb7942d83415d0c",
+    "trace_id": "2d8155a9b93042e0800cecd922a59c74",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 14,
+    "sql": "SELECT `lev3_name` AS `sub_region`,\n       `big_system_channel_name` AS `big_system_channel`,\n       SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0) AS `shop_sale_achievement_rate`,\n       SUM(shop_sale_amount) AS `shop_sale_amount_actual_total`,\n       SUM(shop_sale_target) AS `shop_sale_target_total`\nFROM `chatbi`.`ads_bi_month_shop_item_dan_target_summary_df`\nWHERE `lev2_name` = '东一区'\n  AND `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev3_name`, `big_system_channel_name`\nHAVING (SUM(shop_sale_amount) / NULLIF(SUM(shop_sale_target), 0)) < 0.9\nORDER BY `shop_sale_achievement_rate` ASC\nLIMIT 500",
+    "narrative": "门店销售达成率 已返回 14 条记录。",
+    "display_columns": [
+      {
+        "key": "sub_region",
+        "label": "省区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "big_system_channel",
+        "label": "大系统渠道",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_achievement_rate",
+        "label": "门店销售达成率",
+        "kind": "metric",
+        "unit": "%",
+        "format": "percent",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_amount_actual_total",
+        "label": "门店销售实绩（目标表口径）",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      },
+      {
+        "key": "shop_sale_target_total",
+        "label": "门店销售目标",
+        "kind": "metric",
+        "unit": "元",
+        "format": "currency_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "苏中",
+        "LS03342",
+        "79.66%",
+        "2.78 万元",
+        "3.49 万元"
+      ],
+      [
+        "苏中",
+        "CS01990",
+        "81.18%",
+        "2.09 万元",
+        "2.58 万元"
+      ],
+      [
+        "苏中",
+        "LS08553",
+        "81.61%",
+        "1.17 万元",
+        "1.44 万元"
+      ]
+    ],
+    "plan": {
+      "metric": "shop_sale_achievement_rate",
+      "extra_metrics": [
+        "shop_sale_amount_actual_total",
+        "shop_sale_target_total"
+      ],
+      "table": "ads_bi_month_shop_item_dan_target_summary_df",
+      "group_by": [
+        "sub_region",
+        "big_system_channel"
+      ],
+      "filters": [
+        {
+          "dimension": "region",
+          "op": "eq",
+          "values": [
+            "东一区"
+          ],
+          "raw": ""
+        }
+      ],
+      "having": [
+        {
+          "metric": "shop_sale_achievement_rate",
+          "op": "lt",
+          "value": 0.9,
+          "raw": "低于90%"
+        }
+      ],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [
+        {
+          "field": "shop_sale_achievement_rate",
+          "dir": "asc"
+        }
+      ],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 12,
+    "turn": 1,
+    "question": "2025年1月各大区精准潜客人数、转新人数和转新率是多少？按转新率从低到高排序。",
+    "http": 200,
+    "conversation_id": "b68a17d6e65a4242a8262fe8106313ee",
+    "trace_id": "9ce68a23d3ce4fa3bbf65f964792c7db",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 8,
+    "sql": "SELECT `lev2_name` AS `region`,\n       SUM(potential_num) AS `potential_num_total`,\n       SUM(potential_to_new_num) AS `potential_to_new_num_total`\nFROM `chatbi`.`ads_precision_nutrition_potential_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `potential_num_total` ASC\nLIMIT 500",
+    "narrative": "精准潜客人数 已返回 8 条记录。",
+    "display_columns": [
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "potential_num_total",
+        "label": "精准潜客人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "potential_to_new_num_total",
+        "label": "潜客转新客人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "直辖区",
+        "718",
+        "33"
+      ],
+      [
+        "中二区",
+        "1,019",
+        "48"
+      ],
+      [
+        "西一区",
+        "1,086",
+        "53"
+      ]
+    ],
+    "plan": {
+      "metric": "potential_num_total",
+      "extra_metrics": [
+        "potential_to_new_num_total"
+      ],
+      "table": "ads_precision_nutrition_potential_total_df",
+      "group_by": [
+        "region"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [
+        {
+          "field": "potential_num_total",
+          "dir": "asc"
+        }
+      ],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 12,
+    "turn": 2,
+    "question": "只看转新率最低的3个大区。",
+    "http": 200,
+    "conversation_id": "b68a17d6e65a4242a8262fe8106313ee",
+    "trace_id": "06762ede39eb4d358be07eb5b214317b",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 8,
+    "sql": "SELECT `lev2_name` AS `region`,\n       SUM(potential_num) AS `potential_num_total`,\n       SUM(potential_to_new_num) AS `potential_to_new_num_total`\nFROM `chatbi`.`ads_precision_nutrition_potential_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`\nORDER BY `potential_num_total` ASC\nLIMIT 500",
+    "narrative": "精准潜客人数 已返回 8 条记录。",
+    "display_columns": [
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "potential_num_total",
+        "label": "精准潜客人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "potential_to_new_num_total",
+        "label": "潜客转新客人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "直辖区",
+        "718",
+        "33"
+      ],
+      [
+        "中二区",
+        "1,019",
+        "48"
+      ],
+      [
+        "西一区",
+        "1,086",
+        "53"
+      ]
+    ],
+    "plan": {
+      "metric": "potential_num_total",
+      "extra_metrics": [
+        "potential_to_new_num_total"
+      ],
+      "table": "ads_precision_nutrition_potential_total_df",
+      "group_by": [
+        "region"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [
+        {
+          "field": "potential_num_total",
+          "dir": "asc"
+        }
+      ],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 12,
+    "turn": 3,
+    "question": "把这3个大区下钻到省区。",
+    "http": 200,
+    "conversation_id": "b68a17d6e65a4242a8262fe8106313ee",
+    "trace_id": "30a4d12f224f402799605a4f0ccd8081",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 16,
+    "sql": "SELECT `lev2_name` AS `region`,\n       `lev3_name` AS `sub_region`,\n       SUM(potential_num) AS `potential_num_total`,\n       SUM(potential_to_new_num) AS `potential_to_new_num_total`\nFROM `chatbi`.`ads_precision_nutrition_potential_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`, `lev3_name`\nORDER BY `potential_num_total` ASC\nLIMIT 500",
+    "narrative": "精准潜客人数 已返回 16 条记录。",
+    "display_columns": [
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "sub_region",
+        "label": "省区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "potential_num_total",
+        "label": "精准潜客人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "potential_to_new_num_total",
+        "label": "潜客转新客人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [
+      [
+        "直辖区",
+        "天津",
+        "326",
+        "13"
+      ],
+      [
+        "直辖区",
+        "北京",
+        "392",
+        "20"
+      ],
+      [
+        "中二区",
+        "鄂东",
+        "439",
+        "27"
+      ]
+    ],
+    "plan": {
+      "metric": "potential_num_total",
+      "extra_metrics": [
+        "potential_to_new_num_total"
+      ],
+      "table": "ads_precision_nutrition_potential_total_df",
+      "group_by": [
+        "region",
+        "sub_region"
+      ],
+      "filters": [],
+      "having": [],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [
+        {
+          "field": "potential_num_total",
+          "dir": "asc"
+        }
+      ],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  },
+  {
+    "id": 12,
+    "turn": 4,
+    "question": "再按大系统渠道拆开，找出潜客人数大于50但转新率低于5%的渠道。",
+    "http": 200,
+    "conversation_id": "b68a17d6e65a4242a8262fe8106313ee",
+    "trace_id": "f94415d45d0842a6aa9d477083e505aa",
+    "ok": true,
+    "error_code": null,
+    "user_message": null,
+    "rows": 0,
+    "sql": "SELECT `lev2_name` AS `region`,\n       `lev3_name` AS `sub_region`,\n       `big_system_channel_name` AS `big_system_channel`,\n       SUM(potential_num) AS `potential_num_total`,\n       SUM(potential_to_new_num) AS `potential_to_new_num_total`\nFROM `chatbi`.`ads_precision_nutrition_potential_total_df`\nWHERE `year` = '2025'\n  AND `month` = '01'\nGROUP BY `lev2_name`, `lev3_name`, `big_system_channel_name`\nHAVING (SUM(potential_num)) > 50\n  AND (SUM(potential_num)) < 5\nORDER BY `potential_num_total` ASC\nLIMIT 500",
+    "narrative": "未查询到符合条件的精准潜客人数。请确认时间范围或筛选条件。",
+    "display_columns": [
+      {
+        "key": "region",
+        "label": "大区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "sub_region",
+        "label": "省区",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "big_system_channel",
+        "label": "大系统渠道",
+        "kind": "dimension",
+        "unit": "",
+        "format": "",
+        "decimals": 2
+      },
+      {
+        "key": "potential_num_total",
+        "label": "精准潜客人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      },
+      {
+        "key": "potential_to_new_num_total",
+        "label": "潜客转新客人数",
+        "kind": "metric",
+        "unit": "人",
+        "format": "integer_cn",
+        "decimals": 2
+      }
+    ],
+    "display_rows_preview": [],
+    "plan": {
+      "metric": "potential_num_total",
+      "extra_metrics": [
+        "potential_to_new_num_total"
+      ],
+      "table": "ads_precision_nutrition_potential_total_df",
+      "group_by": [
+        "region",
+        "sub_region",
+        "big_system_channel"
+      ],
+      "filters": [],
+      "having": [
+        {
+          "metric": "potential_num_total",
+          "op": "gt",
+          "value": 50.0,
+          "raw": "大于50"
+        },
+        {
+          "metric": "potential_num_total",
+          "op": "lt",
+          "value": 5.0,
+          "raw": "低于5%"
+        }
+      ],
+      "time_range": {
+        "kind": "absolute",
+        "period": "",
+        "n": 0,
+        "year": "2025",
+        "months": [
+          "01"
+        ],
+        "start_ym": "",
+        "end_ym": ""
+      },
+      "calculation": "",
+      "order_by": [
+        {
+          "field": "potential_num_total",
+          "dir": "asc"
+        }
+      ],
+      "limit": 0,
+      "needs_clarify": false,
+      "clarify_reason": "",
+      "clarify_options": [],
+      "confidence": 0.55,
+      "reasoning": "规则兜底生成（LLM 不可用或被旁路）",
+      "out_of_scope": false,
+      "out_of_scope_reason": ""
+    }
+  }
+]

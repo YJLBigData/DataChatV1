@@ -338,9 +338,9 @@ def test_llm_presets_crud_and_default_flow(tmp_path, monkeypatch):
         s.create(name="no-ak", provider="bailian", api_key="", model="qwen-plus")
 
 
-def test_test_runner_unknown_provider():
-    from app.core.llm.test_runner import test_preset_config
-    r = test_preset_config("claude", api_key="x", model="x")
+def test_llm_probe_unknown_provider():
+    from app.core.llm.llm_probe import probe_preset_config
+    r = probe_preset_config("claude", api_key="x", model="x")
     assert r["ok"] is False
     assert "不支持" in r["error"]
 

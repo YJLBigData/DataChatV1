@@ -28,6 +28,10 @@ export function SmartQDatasetButton({ selectedIds, onChange, locked = false }: P
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<SmartQDataset[]>([]);
+  // 最近一次加载数据集的错误（未启用/未配置/无授权）。用于空态给出可定位的原因，
+  // 而不是笼统的"暂无可用数据集"。
+  const [loadError, setLoadError] = useState("");
+  const [loaded, setLoaded] = useState(false);
   // 当前生效的数据范围（由 selectedIds 推导）。
   const currentScope: Scope = selectedIds.length ? "smartq" : "feihe";
   // 弹窗内的草稿：范围 + 已勾选数据集。
@@ -54,10 +58,15 @@ export function SmartQDatasetButton({ selectedIds, onChange, locked = false }: P
     try {
       const res = await api.smartqDatasets();
       setItems(res.items || []);
+      setLoadError(!res.ok && res.error ? res.error : "");
       if (!res.ok && res.error) toast.error(res.error);
     } catch (e: any) {
-      toast.error(friendlyError(e));
+      const msg = friendlyError(e);
+      setItems([]);
+      setLoadError(msg);
+      toast.error(msg);
     } finally {
+      setLoaded(true);
       setLoading(false);
     }
   }, []);
@@ -213,7 +222,21 @@ export function SmartQDatasetButton({ selectedIds, onChange, locked = false }: P
                         </label>
                       ))
                     ) : (
-                      <div className="px-3 py-8 text-center text-[12px] text-slate-400">暂无可用数据集</div>
+                      <div className="px-3 py-8 text-center text-[12px] text-slate-400">
+                        {loadError ? (
+                          <>
+                            <div className="text-rose-500">{loadError}</div>
+                            <div className="mt-1 text-slate-400">智能小Q 需由管理员在服务器配置（SMARTQ_*）后方可使用。</div>
+                          </>
+                        ) : loaded ? (
+                          <>
+                            <div>当前账号没有已授权的智能小Q数据集</div>
+                            <div className="mt-1 text-slate-400">请联系管理员在 Quick BI 侧开通数据集授权。</div>
+                          </>
+                        ) : (
+                          "点击「刷新」加载数据集"
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>

@@ -396,7 +396,7 @@ class ExpertTeamOrchestrator:
 
     def _fetch_smartq_data(self, query: str, *, user_id: str, smartq_cube_ids: list[str],
                            base: dict[str, Any]) -> dict[str, Any]:
-        """专家团取数使用顶部「数据反问」选择的 SmartQ 数据集。"""
+        """专家团取数使用顶部「数据范围」选择的 SmartQ 数据集。"""
         out = dict(base)
         try:
             from app.core.auth import get_auth_store

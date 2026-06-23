@@ -313,12 +313,38 @@ if [ ! -d "$BACKEND/.venv" ]; then
   python3.11 -m venv "$BACKEND/.venv"
 fi
 PYBIN="$BACKEND/.venv/bin/python"
-if ! "$PYBIN" -c "import fastapi, sqlglot, redis, bcrypt, jwt" >/dev/null 2>&1; then
+# 依赖漂移防护（审计 P1）：旧逻辑只抽样 import fastapi/sqlglot/redis/bcrypt/jwt，
+# requirements.txt 新增/改版依赖（如 playwright）不会触发安装，venv 与声明长期不一致。
+# 现按 requirements.txt 内容哈希判定：哈希变化或 venv 缺戳或 pip check 不通过 → 全量重装，
+# 装完把哈希写进 venv 戳文件，下次启动命中即跳过。任何一项不满足都装，绝不"看着像就跳过"。
+REQ_FILE="$BACKEND/requirements.txt"
+REQ_STAMP="$BACKEND/.venv/.requirements.sha256"
+req_hash(){ if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$REQ_FILE" | cut -d' ' -f1; else sha256sum "$REQ_FILE" | cut -d' ' -f1; fi; }
+CUR_REQ_HASH="$(req_hash)"
+PREV_REQ_HASH="$(cat "$REQ_STAMP" 2>/dev/null || true)"
+NEED_INSTALL=0
+if [ "$CUR_REQ_HASH" != "$PREV_REQ_HASH" ]; then
+  NEED_INSTALL=1
+  gray "  · requirements.txt 有变更（或首次），将安装/更新依赖"
+elif ! "$PYBIN" "$ROOT/scripts/check_requirements.py" "$REQ_FILE" >/dev/null 2>&1; then
+  # 哈希没变但有包缺失/版本不满足（手删包、半残 venv）→ 体检不过也要修复。
+  NEED_INSTALL=1
+  gray "  · 依赖体检发现缺口，将修复依赖"
+elif ! "$PYBIN" -m pip check >/dev/null 2>&1; then
+  NEED_INSTALL=1
+  gray "  · pip check 发现依赖不一致，将修复依赖"
+fi
+if [ "$NEED_INSTALL" = "1" ]; then
   gray "  安装/更新 backend/requirements.txt …"
   "$PYBIN" -m pip install --upgrade pip >/dev/null
-  "$PYBIN" -m pip install -r "$BACKEND/requirements.txt" >/tmp/datachat-pip.log 2>&1 || {
+  "$PYBIN" -m pip install -r "$REQ_FILE" >/tmp/datachat-pip.log 2>&1 || {
     red "  pip install 失败，查看 /tmp/datachat-pip.log"; exit 4;
   }
+  # 装完再 pip check 一次，确保真的对齐后才写哈希戳（戳=安装成功且自洽的凭证）。
+  "$PYBIN" -m pip check >/tmp/datachat-pipcheck.log 2>&1 || {
+    red "  pip check 仍未通过，查看 /tmp/datachat-pipcheck.log"; exit 4;
+  }
+  printf '%s' "$CUR_REQ_HASH" > "$REQ_STAMP"
 fi
 green "  ✓ Python 依赖就绪"
 gray "  初始化本地 chatbi 样例表（已有数据则跳过插入）…"
