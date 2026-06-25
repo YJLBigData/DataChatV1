@@ -97,30 +97,42 @@ tables:
   ads_bi_month_shop_item_dan_detail_df:
     label: 月度门店段位明细
     schema: chatbi
-    grain: 月-大区-省区-省份-城市-门店-渠道-系列-段位-圈层
+    grain: 月-大区-省区-地区-省份-城市-门店-连锁系统-渠道-系列-段位-品类
     description: |
-      summary 表的门店级明细版（生产 12.7M 行，2025-01 ~ 2026-05），在 summary 维度
-      之上多了 shop_code/shop_name/province。当用户问"具体哪家门店"、"门店排名"、
-      "某省下钻"、"门店级业绩"时选这张表；如果只问大区/省区/城市层面，仍优先 summary。
+      summary 表的门店级明细版（生产千万行级，按 year+month 会计月）。在 summary 维度之上
+      多了 shop_code/shop_name/province，以及 lev4_name(地区)、chainstore(连锁系统)、
+      channel(渠道等级)、terminal_circle_level(当前快照=品牌品/流通品)，并带 terminal_sale_amount
+      的月日均 / 前三月日均预计算列。当用户问"具体哪家门店"、"门店排名"、"某省/某地区下钻"、
+      "门店级业绩"、"某连锁系统"、"品牌品/流通品"、"门店日均销售"时选这张表；只问大区/省区/城市
+      层面仍优先 summary。
     time_field_year: year
     time_field_month: month
     time_format: "YYYY + MM 两列拼成 YYYY-MM"
     primary_dimensions:
       - region
       - sub_region
+      - district
       - province
       - city
       - shop
+      - chainstore
       - big_system_channel
+      - channel_grade
       - item_series
       - item_dan
-      - terminal_circle
+      - product_tier
     measures:
       - terminal_sale_amount_total
       - reduction_gd_sale_amount_total
+      - terminal_sale_amount_avg_day
+      - terminal_sale_amount_before_3m_avg_day
     notes:
-      - 字段口径与 summary 完全一致，只是粒度更细（含 shop_code/shop_name/province）
-      - 行数比 summary 大 10 倍——只在确实需要门店级时才用，避免无谓全表扫描
+      - 金额口径与 summary 一致（terminal_sale_amount 终端销售额、reduction_gd_sale_amount 还原过单），只是粒度更细（含 shop_code/shop_name/province/lev4_name 地区/连锁系统）。
+      - 行数远大于 summary——只在确实需要门店/地区/连锁/品类级时才用，避免无谓全表扫描。
+      - terminal_circle_level 列在当前快照取值为 品牌产品/流通产品（产品品类，见 product_tier 维度），与 summary 表的"圈层等级"(潜力终端/平台型…)口径不同；按品牌品/流通品筛选用 product_tier。
+      - channel_type/channel_name(渠道等级/渠道名称，如 SC) 与火山POC表的 channel_type 代码(母婴店/KA…)不是一回事，勿混用。
+      - terminal_sale_amount_month_avg_day(月日均)、terminal_sale_amount_before_mar_avg_day(前三月日均) 为预计算列，可加和。
+      - 保留分区字段 ds（MySQL 仅同步最新一份），无需用户感知，也不要按 ds 过滤。
 
   ads_bi_month_shop_item_dan_target_summary_df:
     label: 月度门店段位目标汇总
@@ -185,6 +197,43 @@ tables:
     notes:
       - potential_num = 精准潜客人数；potential_to_new_num = 转化为新客的人数
 
+  ads_bi_awake_person_index_summary_df:
+    label: 激活一线人员指标汇总
+    schema: chatbi
+    grain: 人员（大区-省区-地区-销售代表）× 会计月
+    description: |
+      "激活一线"业务的人员（销售代表）月度指标汇总表（按 acc_month 会计月，一线人员一人一行）。
+      覆盖动销、终端销售/达成、过单/达成、鹤礼3新客与复购、婴配粉首购、双萃(jc_qc)、启萃、
+      终身利益绑定、企微运营、通路活动 / 妈妈爱活动等全口径一线作战指标。
+      当用户问到"销售代表 / 业务员 / 某个人名 / 人员岗位"，或问"动销率 / 鹤礼3新客 / 双萃 / 启萃 /
+      企微 / 通路活动 / 妈妈爱"这些一线专属指标时，用这张表（其它销售表都不到人员粒度、也没有这些指标）。
+    time_field: acc_month
+    time_format: "YYYY-MM"
+    primary_dimensions:
+      - region
+      - sub_region
+      - district
+      - salesperson
+      - person_post
+    measures:
+      - person_dynamic_sales_rate
+      - person_sale_amount
+      - person_sale_achieve_rate
+      - person_gd_amount
+      - person_gd_achieve_rate
+      - person_heli3_new_num
+      - person_heli3_new_achieve_rate
+      - person_jc_qc_sale_amount
+      - person_qc_new_num
+      - person_benefit_binding_num
+    notes:
+      - 一人一行：person_code/person_name 是销售代表；person_post 目前主要是"销售代表"。
+      - 该表是日全量快照（生产按 ds 分区，MySQL 只同步最新一份 ds）；acc_month 为会计月，相对时间（本月/上月）按 MAX(acc_month) 解析，无需也不要按 ds 过滤。
+      - person_code/person_name 为 NULL 的行是"地区下无归属人员的门店"兜底桶（多为 0 值），是可加的明细而非小计；只看实际销售代表时加 person_code IS NOT NULL。
+      - 计数/金额类指标可直接 SUM；达成率/动销率用"分子之和 / 分母之和"（见各 metric expression）。
+      - 大量 *_current_month_avg_day(当月日均)、*_before_3m_avg_day(前三月日均)、*_last_month(上月) 为预计算列可加和；而 *_rank(排名)、*_diff(对比上一级差异) 是逐行对比产物，不要跨行聚合。
+      - heli3_new_achieve_rate(鹤礼3新客达成率) 的分子用 heli3_num_brand(鹤礼3.0新客_品牌品)，非 heli3_new_num，与生产预计算列一致。
+
 # ----------------------------------------------------------------
 # 维度 dimensions
 # ----------------------------------------------------------------
@@ -200,6 +249,7 @@ dimensions:
       ads_bi_month_shop_item_dan_target_summary_df: lev2_name
       ads_member_first_purchase_new_customer_total_df: lev2_name
       ads_precision_nutrition_potential_total_df: lev2_name
+      ads_bi_awake_person_index_summary_df: lev2_name
     sample_values: [东一区, 中一区, 中二区, 北一区, 南一区, 南二区, 西一区, 西二区, 直辖区]
     description: 飞鹤销售区域第一层（生产实际 9 个大区：东一/中一/中二/北一/南一/南二/西一/西二/直辖）
 
@@ -213,6 +263,7 @@ dimensions:
       ads_bi_month_shop_item_dan_target_summary_df: lev3_name
       ads_member_first_purchase_new_customer_total_df: lev3_name
       ads_precision_nutrition_potential_total_df: lev3_name
+      ads_bi_awake_person_index_summary_df: lev3_name
     sample_values:
       - 甘肃
       - 新疆
@@ -503,6 +554,61 @@ dimensions:
       ads_bi_hs_sale_info_df: is_guide_shop
     sample_values: ["是", "否"]
 
+  # ---- 激活一线人员表 / 明细表新增维度 ----
+  salesperson:
+    label: 销售代表
+    aliases: [销售代表, 人员, 业务员, 一线人员, 营销人员, 人员名称, 员工]
+    table_columns:
+      ads_bi_awake_person_index_summary_df: person_name
+    code_column:
+      ads_bi_awake_person_index_summary_df: person_code
+    sample_values: [李季昆, 邵军建, 顾顺, 李旭, 孙肖, 杨克, 刘刚]
+    description: 激活一线人员（销售代表）姓名，person_code 为人员编码。仅 ads_bi_awake_person_index_summary_df 有人员粒度。
+
+  person_post:
+    label: 人员岗位
+    aliases: [人员岗位, 岗位, 职位]
+    table_columns:
+      ads_bi_awake_person_index_summary_df: person_post
+    sample_values: [销售代表]
+    description: 一线人员岗位，目前主要为"销售代表"。
+
+  district:
+    label: 地区
+    aliases: [地区, 地区名称, 四级区域, lev4]
+    table_columns:
+      ads_bi_month_shop_item_dan_detail_df: lev4_name
+      ads_bi_awake_person_index_summary_df: lev4_name
+    sample_values: [宿迁东, 徐州中, 淄博]
+    description: 飞鹤销售区域第四层（地区）；层级为 lev2 大区 > lev3 省区 > lev4 地区。明细表与人员表均有此列。
+
+  chainstore:
+    label: 连锁系统
+    aliases: [连锁系统, 连锁, 连锁系统名称, 连锁客户]
+    table_columns:
+      ads_bi_month_shop_item_dan_detail_df: chainstore_name
+    code_column:
+      ads_bi_month_shop_item_dan_detail_df: chainstore_code
+    description: 门店所属连锁系统名称（明细表特有；很多门店该字段为空 NULL）。
+
+  channel_grade:
+    label: 渠道等级
+    aliases: [渠道等级, 渠道名称]
+    table_columns:
+      ads_bi_month_shop_item_dan_detail_df: channel_type
+    sample_values: [SC]
+    description: 明细表的渠道等级/渠道名称（如 SC）；与火山POC表 channel_type(母婴店/KA 等数字代码) 是完全不同的口径，勿混用。
+
+  product_tier:
+    label: 产品品类
+    aliases: [产品品类, 品牌品, 流通品, 品牌产品, 流通产品]
+    table_columns:
+      ads_bi_month_shop_item_dan_detail_df: terminal_circle_level
+    sample_values: [品牌产品, 流通产品]
+    description: |
+      明细表 terminal_circle_level 列在当前快照取值为 品牌产品/流通产品（产品品类层级），
+      与 summary 表"圈层等级"(潜力终端-流通品/闭环圈子…)口径不同；按品牌品/流通品筛选时用此维度。
+
 # ----------------------------------------------------------------
 # 时间维度（特殊处理）
 # ----------------------------------------------------------------
@@ -511,6 +617,7 @@ time_dimensions:
     label: 会计月
     table_columns:
       ads_bi_hs_sale_info_df: acc_month
+      ads_bi_awake_person_index_summary_df: acc_month
     granularity: month
     format: "YYYY-MM"
   ym_year_month:
@@ -589,7 +696,7 @@ metrics:
 
   reduction_gd_sale_amount_total:
     label: 还原过单金额（不含货补）
-    aliases: [还原过单, 过单额, 经销商过单额, 不含货补过单]
+    aliases: [还原过单金额, 还原过单销售额, 还原过单, 过单额, 经销商过单额, 不含货补过单]
     table: ads_bi_month_shop_item_dan_summary_df
     expression: "SUM(reduction_gd_sale_amount)"
     unit: 元
@@ -785,6 +892,428 @@ metrics:
     typical_questions:
       - 各大区潜客转新率
       - 精准营养转化率怎么样
+
+  # ===== 激活一线人员指标（ads_bi_awake_person_index_summary_df，人员/销售代表粒度） =====
+  # 计数/金额 → SUM 可加；达成率/动销率 → 分子之和/分母之和（已按生产预计算列校验）；
+  # 复购率/铺市率/企微完成率/回访率等用快照列 AVG 近似（单人查询精确，分组为非加权均值）。
+
+  person_management_shop_qty:
+    label: 管理门店数
+    aliases: [管理门店数, 管理门店数量, 人员管理门店数, 负责门店数]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(management_shop_qty)"
+    unit: 家
+    display_format: integer_cn
+    decimals: 0
+    domain: activation
+    description: 销售代表管理的门店数量。
+
+  person_allow_sales_shop_qty:
+    label: 允销门店数
+    aliases: [允销门店数, 允销门店数量, 允销门店]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(allow_sales_shop_qty)"
+    unit: 家
+    display_format: integer_cn
+    decimals: 0
+    domain: activation
+    description: 允许销售的门店数量（动销率分母）。
+
+  person_dynamic_sales_shop_qty:
+    label: 动销门店数
+    aliases: [动销门店数, 动销门店数量, 动销门店]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(dynamic_sales_shop_qty)"
+    unit: 家
+    display_format: integer_cn
+    decimals: 0
+    domain: activation
+    description: 当月产生动销（有销售）的门店数量（动销率分子）。
+
+  person_dynamic_sales_rate:
+    label: 动销率
+    aliases: [动销率, 人员动销率, 门店动销率, 销售代表动销率]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(dynamic_sales_shop_qty) / NULLIF(SUM(allow_sales_shop_qty), 0)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: activation
+    description: 动销门店数 / 允销门店数，衡量门店激活程度。一线核心指标，仅人员表有。
+    typical_dimensions: [region, sub_region, district, salesperson]
+    typical_questions:
+      - 各销售代表动销率排名
+      - 各大区动销率怎么样
+
+  person_sale_amount:
+    label: 人员终端销售金额
+    aliases: [人员终端销售金额, 人员销售额, 销售代表销售额, 业务员销售额, 一线销售额, 人员终端销售额]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(sale_amount)"
+    unit: 元
+    display_format: currency_cn
+    decimals: 2
+    higher_is_better: true
+    domain: sales
+    description: 销售代表名下终端销售金额合计（人员粒度；大区/省区/城市层面的销售额请用 summary 表 terminal_sale_amount_total）。
+    typical_dimensions: [region, sub_region, district, salesperson]
+    typical_questions:
+      - 各销售代表终端销售金额排名
+      - 某个销售代表的销售额
+
+  person_sale_amount_avg_day:
+    label: 人员终端销售金额日均
+    aliases: [人员终端销售金额日均, 人员销售额日均, 销售代表日均销售, 人员日均销售额]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(sale_amount_current_month_avg_day)"
+    unit: 元
+    display_format: currency_cn
+    decimals: 2
+    higher_is_better: true
+    domain: sales
+    description: 终端销售金额当月日均（= 销售金额 / 当月有效天数 的预计算列，可加和）。
+
+  person_sale_target:
+    label: 人员终端销售目标
+    aliases: [人员终端销售目标, 人员销售目标, 销售代表销售目标]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(sale_target)"
+    unit: 元
+    display_format: currency_cn
+    decimals: 2
+    domain: target
+    description: 销售代表终端销售目标。
+
+  person_sale_achieve_rate:
+    label: 人员终端销售达成率
+    aliases: [人员终端销售达成率, 人员销售达成率, 销售代表达成率, 业务员达成率, 人员达成率]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(sale_amount) / NULLIF(SUM(sale_target), 0)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: target
+    description: 终端销售金额 / 终端销售目标（人员口径）。
+    typical_dimensions: [region, sub_region, district, salesperson]
+    typical_questions:
+      - 各销售代表销售达成率
+      - 哪些销售代表没完成销售目标
+
+  person_gd_amount:
+    label: 人员过单金额
+    aliases: [人员过单金额, 销售代表过单金额, 人员过单, 业务员过单金额]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(gd_amount)"
+    unit: 元
+    display_format: currency_cn
+    decimals: 2
+    higher_is_better: true
+    domain: distribution
+    description: 销售代表名下过单金额合计（人员粒度）。
+
+  person_gd_target:
+    label: 人员过单目标
+    aliases: [人员过单目标, 销售代表过单目标]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(gd_target)"
+    unit: 元
+    display_format: currency_cn
+    decimals: 2
+    domain: target
+    description: 销售代表过单目标。
+
+  person_gd_achieve_rate:
+    label: 人员过单达成率
+    aliases: [人员过单达成率, 销售代表过单达成率, 人员过单目标达成率]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(gd_amount) / NULLIF(SUM(gd_target), 0)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: target
+    description: 过单金额 / 过单目标（人员口径）。
+
+  person_heli3_new_num:
+    label: 鹤礼3新客人数
+    aliases: [鹤礼3新客人数, 人员鹤礼3新客, 销售代表鹤礼3新客, 一线鹤礼3新客]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(heli3_new_num)"
+    unit: 人
+    display_format: integer_cn
+    decimals: 0
+    higher_is_better: true
+    domain: member
+    description: 销售代表当月鹤礼3新客人数（人员口径；与会员表 ads_member… 的鹤礼3.0新客是不同粒度/口径）。
+    typical_dimensions: [region, sub_region, district, salesperson]
+
+  person_heli3_new_achieve_rate:
+    label: 鹤礼3新客达成率
+    aliases: [鹤礼3新客达成率, 鹤礼3达成率, 鹤礼三新客达成率, 人员鹤礼3新客达成率]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(heli3_num_brand) / NULLIF(SUM(heli3_new_target), 0)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: member
+    description: 鹤礼3新客达成率，分子为 heli3_num_brand(鹤礼3.0新客_品牌品)、分母为 heli3_new_target，与生产预计算列口径一致。
+
+  person_heli3_rebuy_num:
+    label: 鹤礼3复购人数
+    aliases: [鹤礼3复购人数, 鹤礼3复购, 鹤礼三复购人数]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(heli3_rebuy_num)"
+    unit: 人
+    display_format: integer_cn
+    decimals: 0
+    higher_is_better: true
+    domain: member
+    description: 销售代表当月鹤礼3复购人数。
+
+  person_heli3_rebuy_rate:
+    label: 鹤礼3复购率
+    aliases: [鹤礼3复购率, 鹤礼三复购率, 人员鹤礼3复购率]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "AVG(heli3_rebuy_rate)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: member
+    description: 鹤礼3复购率（取生产预计算列；分组时为各人员率值的非加权平均，单人查询为精确值）。
+
+  person_baby_first_purchase_new_num:
+    label: 婴配粉首购新客人数
+    aliases: [婴配粉首购新客人数, 婴配粉首购新客, 婴配粉首购, 首购新客人数]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(baby_first_purchase_new_num)"
+    unit: 人
+    display_format: integer_cn
+    decimals: 0
+    higher_is_better: true
+    domain: member
+    description: 销售代表当月婴配粉首购新客人数。
+
+  person_baby_first_purchase_rebuy_rate:
+    label: 婴配粉首购新客复购率
+    aliases: [婴配粉首购新客复购率, 婴配粉首购复购率, 首购新客复购率]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "AVG(baby_first_purchase_new_rebuy_rate)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: member
+    description: 婴配粉首购新客复购率（预计算列；分组为非加权平均）。
+
+  person_jc_qc_sale_amount:
+    label: 双萃销售金额
+    aliases: [双萃销售金额, 双萃销售额, 双萃金额, jc_qc销售金额]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(jc_qc_sale_amount)"
+    unit: 元
+    display_format: currency_cn
+    decimals: 2
+    higher_is_better: true
+    domain: activation
+    description: 双萃(jc_qc)产品销售金额（人员口径）。一线专属，仅人员表有。
+    typical_dimensions: [region, sub_region, district, salesperson]
+
+  person_jc_qc_new_num:
+    label: 双萃新客人数
+    aliases: [双萃新客人数, 双萃新客]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(jc_qc_new_num)"
+    unit: 人
+    display_format: integer_cn
+    decimals: 0
+    higher_is_better: true
+    domain: activation
+    description: 双萃新客人数。
+
+  person_jc_qc_dynamic_sales_rate:
+    label: 双萃动销率
+    aliases: [双萃动销率]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(jc_qc_outstock_shop_qty) / NULLIF(SUM(jc_qc_instock_shop_qty), 0)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: activation
+    description: 双萃出库门店数 / 双萃入库门店数。
+
+  person_jc_qc_spread_market_rate:
+    label: 双萃铺市率
+    aliases: [双萃铺市率, 双萃铺市]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "AVG(jc_qc_spread_market_rate)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: activation
+    description: 双萃铺市率（预计算列；分组为非加权平均）。
+
+  person_qc_new_num:
+    label: 启萃新客人数
+    aliases: [启萃新客人数, 启萃新客]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(qc_new_num)"
+    unit: 人
+    display_format: integer_cn
+    decimals: 0
+    higher_is_better: true
+    domain: activation
+    description: 启萃新客人数。
+
+  person_other_series_to_qc_num:
+    label: 其他品转启萃人数
+    aliases: [其他品转启萃人数, 其他品转启萃, 转启萃人数]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(other_series_to_qc_num)"
+    unit: 人
+    display_format: integer_cn
+    decimals: 0
+    higher_is_better: true
+    domain: activation
+    description: 其他品系转启萃人数。
+
+  person_benefit_binding_num:
+    label: 终身利益绑定人数
+    aliases: [终身利益绑定人数, 终身利益绑定, 利益绑定人数]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(benefit_binding_num)"
+    unit: 人
+    display_format: integer_cn
+    decimals: 0
+    higher_is_better: true
+    domain: activation
+    description: 终身利益绑定人数。
+
+  person_qw_task_complete_rate:
+    label: 企微任务完成率
+    aliases: [企微任务完成率, 企微完成率, 企业微信任务完成率]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "AVG(qw_task_complete_rate)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: activation
+    description: 企微任务完成率（预计算列；分组为非加权平均）。
+
+  person_new_qw_add_rate:
+    label: 婴配粉首购新客企微添加率
+    aliases: [企微添加率, 婴配粉首购新客企微添加率, 企微新客添加率]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "AVG(new_qw_add_rate)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: activation
+    description: 婴配粉首购新客企微添加率（预计算列；分组为非加权平均）。
+
+  person_customer_return_visit_rate:
+    label: 客户回访率
+    aliases: [客户回访率, 回访率]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "AVG(customer_return_visit_rate)"
+    unit: "%"
+    display_format: percent
+    decimals: 2
+    higher_is_better: true
+    domain: activation
+    description: 客户回访率（预计算列；分组为非加权平均）。
+
+  person_access_activity_venue:
+    label: 通路活动场次
+    aliases: [通路活动场次, 通路活动场数, 通路场次]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(access_activity_venue)"
+    unit: 场
+    display_format: integer_cn
+    decimals: 0
+    higher_is_better: true
+    domain: activation
+    description: 通路活动场次。
+
+  person_access_activity_new_num:
+    label: 通路活动新客数
+    aliases: [通路活动新客数, 通路活动新客, 通路新客数]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(access_activity_new_num)"
+    unit: 人
+    display_format: integer_cn
+    decimals: 0
+    higher_is_better: true
+    domain: activation
+    description: 通路活动新客数。
+
+  person_access_activity_sale_amount:
+    label: 通路活动销售额
+    aliases: [通路活动销售额, 通路活动销售金额]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(access_activity_sale_amount)"
+    unit: 元
+    display_format: currency_cn
+    decimals: 2
+    higher_is_better: true
+    domain: activation
+    description: 通路活动销售额。
+
+  person_mmda_activity_venue:
+    label: 妈妈爱活动场次
+    aliases: [妈妈爱活动场次, 妈妈爱场次, 妈妈爱活动场数]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(mmda_activity_venue)"
+    unit: 场
+    display_format: integer_cn
+    decimals: 0
+    higher_is_better: true
+    domain: activation
+    description: 妈妈爱活动场次。
+
+  person_mmda_activity_new_num:
+    label: 妈妈爱活动新客数
+    aliases: [妈妈爱活动新客数, 妈妈爱活动新客, 妈妈爱新客数]
+    table: ads_bi_awake_person_index_summary_df
+    expression: "SUM(mmda_activity_new_num)"
+    unit: 人
+    display_format: integer_cn
+    decimals: 0
+    higher_is_better: true
+    domain: activation
+    description: 妈妈爱活动新客数。
+
+  # ===== 月度门店段位明细 日均（ads_bi_month_shop_item_dan_detail_df 预计算列） =====
+  terminal_sale_amount_avg_day:
+    label: 终端销售金额日均
+    aliases: [终端销售金额日均, 终端销售额日均, 门店日均销售额, 销售额月日均]
+    table: ads_bi_month_shop_item_dan_detail_df
+    expression: "SUM(terminal_sale_amount_month_avg_day)"
+    unit: 元
+    display_format: currency_cn
+    decimals: 2
+    higher_is_better: true
+    domain: sales
+    description: 明细表终端销售金额当月日均（预计算列，可加和）。门店/段位级日均销售用此指标。
+
+  terminal_sale_amount_before_3m_avg_day:
+    label: 终端销售金额前三月日均
+    aliases: [终端销售金额前三月日均, 终端销售额前3月日均, 前三月日均销售额]
+    table: ads_bi_month_shop_item_dan_detail_df
+    expression: "SUM(terminal_sale_amount_before_mar_avg_day)"
+    unit: 元
+    display_format: currency_cn
+    decimals: 2
+    higher_is_better: true
+    domain: sales
+    description: 明细表终端销售金额前三月日均（预计算列，可加和），用于环比基线对比。
 
 # ----------------------------------------------------------------
 # 计算/对比口径（同比、环比、占比、Top N、累计）
@@ -1032,6 +1561,43 @@ few_shots:
       province（行政省）与 sub_region（飞鹤内部省区）是两个不同的维度。province 只在 detail 表。
       用户问"河南省/广东省/山东省"等行政省时用 detail.province；问"豫北/粤东/苏中"等飞鹤省区时用 sub_region(lev3_name)。
 
+  - question: 各销售代表动销率排名
+    intent:
+      metric: person_dynamic_sales_rate
+      time_range:
+        kind: relative
+        period: this_month
+      group_by: [salesperson]
+      order_by: [{field: person_dynamic_sales_rate, dir: desc}]
+    sql_hint: |
+      -- 人员粒度只在 ads_bi_awake_person_index_summary_df；动销率=动销门店/允销门店，按分子分母之和聚合
+      SELECT person_code, person_name AS salesperson,
+             SUM(dynamic_sales_shop_qty) / NULLIF(SUM(allow_sales_shop_qty), 0) AS person_dynamic_sales_rate
+      FROM ads_bi_awake_person_index_summary_df
+      WHERE acc_month='2026-06' AND person_code IS NOT NULL
+      GROUP BY person_code, person_name
+      ORDER BY person_dynamic_sales_rate DESC
+    notes: 涉及"销售代表/业务员/人员/动销率/双萃/启萃/鹤礼3新客达成率/企微/通路活动/妈妈爱"一律切到人员表。
+
+  - question: 徐州中地区各销售代表的鹤礼3新客达成率
+    intent:
+      metric: person_heli3_new_achieve_rate
+      time_range:
+        kind: relative
+        period: this_month
+      filters:
+        district: 徐州中
+      group_by: [salesperson]
+    notes: 鹤礼3新客达成率分子用 heli3_num_brand(品牌品)，与生产口径一致。
+
+  - question: 各大区双萃销售金额
+    intent:
+      metric: person_jc_qc_sale_amount
+      time_range:
+        kind: relative
+        period: this_month
+      group_by: [region]
+
 # ----------------------------------------------------------------
 # 同义词字典（用户口语 → 标准术语）
 # ----------------------------------------------------------------
@@ -1048,3 +1614,7 @@ synonyms:
   "看一下": "查询"
   "怎么样": "查询当前业绩"
   "情况如何": "查询当前业绩"
+  "业务员": "销售代表"
+  "营销员": "销售代表"
+  "双萃": "双萃产品"
+  "启萃": "启萃产品"

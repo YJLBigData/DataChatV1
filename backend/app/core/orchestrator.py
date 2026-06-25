@@ -32,6 +32,8 @@ from app.core.exec import ExecError, get_executor
 from app.core.guard import GuardError, SQLGuard
 from app.core.llm.router import LLMError, get_llm_router
 from app.core.nl2sql import PlanCompiler, Planner, QueryPlan
+from app.core.nl2sql.accuracy_critic import AccuracyCritic
+from app.core.nl2sql.result_validator import ResultValidator
 from app.core.retrieval import HybridRetriever
 from app.core.semantic import SemanticLayer
 # SSE 帧编码已拆到 app.core.sse；这里 re-export，保持 main.py 的历史 import 路径不变。
@@ -114,6 +116,10 @@ class Pipeline:
         )
         self.executor = get_executor()
         self.answerer = Answerer(self.semantic, self.llm)
+        # 准确率护栏：编译前的结构化复核（Accuracy Critic）+ 执行后的结果校验（Result Validator）。
+        # 二者均为确定性、无 LLM 默认开销，可独立测试；Critic 复用 planner 的等价指标解析。
+        self.critic = AccuracyCritic(self.planner)
+        self.validator = ResultValidator(self.semantic)
         self.cache = get_cache()
 
     def warmup(self) -> dict[str, Any]:
@@ -400,6 +406,29 @@ class Pipeline:
                 events=[e.to_dict() for e in events],
             )
 
+        # Stage 3.4: Accuracy Critic（确定性结构化复核 + 至多一次确定性修复）。
+        # 在编译前对最终 plan 做一次"是否honor问句意图"的独立复核：缺指标补、TopN 漏截截、
+        # 排序反了纠、结构完整却误澄清放行。仅对高风险问题触发（multi-metric/field-list/
+        # TopN/派生指标/追问/低置信/已计划澄清），其余信任 planner，零额外开销。
+        # 复核结果落 plan.reasoning 之外的 events 审计，绝不向用户暴露内部提示。
+        try:
+            followup = self.planner._looks_like_followup(question_clean, previous_plan)
+            if AccuracyCritic.should_review(plan, plan_result.rule_seed, followup):
+                plan, critic_report, repaired = self.critic.critique_and_repair(
+                    question_clean, plan,
+                    rule_seed=plan_result.rule_seed, bundle=plan_result.bundle,
+                    previous_plan=previous_plan, inherit=followup,
+                )
+                emit("critic", "ok" if critic_report.ok else "repaired", {
+                    "severity": critic_report.severity,
+                    "repaired": repaired,
+                    "missing_metrics": critic_report.missing_metrics,
+                    "missing_dimensions": critic_report.missing_dimensions,
+                    "clarify_suppressed": critic_report.clarify_should_be_suppressed,
+                }, 0)
+        except Exception as exc:  # noqa: BLE001 — 复核绝不阻断主链路
+            logger.warning("accuracy critic skipped: %s", exc)
+
         # Stage 3.5: clarify shortcut
         if plan.needs_clarify:
             answer = self.answerer.build(question_clean, plan, {"columns": {}}, None, "", skip_llm=True)
@@ -613,6 +642,29 @@ class Pipeline:
                     emit("data_range", "empty_relative", {"latest": latest, "table": plan.table}, 0)
         except Exception as exc:  # noqa: BLE001 — 提示性增强，绝不影响主结果
             logger.debug("data-range note skipped: %s", exc)
+
+        # Stage 7.1: Result Validator（执行后、答案定稿前的结果一致性校验）。
+        # 把"答非所问/排序错/空结果"显式化：报告落 explainability.validation 供审计，
+        # 面向用户的提示并入 risk_notes（去重），绝不伪造成功、不改写真实数据。
+        try:
+            vreport = self.validator.validate(question_clean, plan, meta, exec_obj)
+            if vreport.issues:
+                explain = answer_payload.setdefault("explainability", {})
+                if isinstance(explain, dict):
+                    explain["validation"] = vreport.to_dict()
+                notes = vreport.user_notes()
+                if notes:
+                    existing = list(answer_payload.get("risk_notes") or [])
+                    for n in notes:
+                        if n not in existing:
+                            existing.append(n)
+                    answer_payload["risk_notes"] = existing
+            # 始终上报 validate 事件（含 ok），让 trace 能看到"已校验"，便于审计与观测。
+            emit("validate", "ok" if vreport.ok else "flagged",
+                 {"severity": vreport.severity, "issues": [i.code for i in vreport.issues]}, 0)
+        except Exception as exc:  # noqa: BLE001 — 校验绝不阻断主结果
+            logger.warning("result validator skipped: %s", exc)
+
         emit("answer", "ok", {
             "chart": (answer_payload.get("chart") or {}).get("type"),
             "llm_wait_ms": 0 if skip_llm_narrative else answer_ms,

@@ -19,7 +19,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
@@ -131,6 +131,9 @@ class PlanResult:
     bundle: RetrievalBundle
     raw_llm_payload: dict[str, Any]
     elapsed_ms: int
+    # 纯从问句提取的规则信号（指标命中/维度/TopN/排序/算子…），与 LLM 无关。
+    # 透传给 Accuracy Critic 做"最终 plan 是否honor问句意图"的独立复核，避免重复解析。
+    rule_seed: dict[str, Any] = field(default_factory=dict)
 
 
 class Planner:
@@ -416,6 +419,7 @@ class Planner:
                 bundle=bundle,
                 raw_llm_payload={"out_of_scope": True},
                 elapsed_ms=int((time.perf_counter() - started) * 1000),
+                rule_seed=rule_seed,
             )
 
         # Try cache first —— key 必须含上一轮上下文 + followup + 数据域指纹，
@@ -439,7 +443,7 @@ class Planner:
         if cached:
             try:
                 plan = QueryPlan.from_dict(cached)
-                return PlanResult(plan=plan, bundle=bundle, raw_llm_payload={"cache": True}, elapsed_ms=int((time.perf_counter() - started) * 1000))
+                return PlanResult(plan=plan, bundle=bundle, raw_llm_payload={"cache": True}, elapsed_ms=int((time.perf_counter() - started) * 1000), rule_seed=rule_seed)
             except Exception:
                 pass
 
@@ -476,6 +480,7 @@ class Planner:
             bundle=bundle,
             raw_llm_payload=payload if isinstance(payload, dict) else {"raw": str(payload)},
             elapsed_ms=int((time.perf_counter() - started) * 1000),
+            rule_seed=rule_seed,
         )
 
     # ------------------------------------------------------------- prompts

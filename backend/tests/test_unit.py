@@ -37,8 +37,8 @@ def semantic(cfg):
 def test_semantic_layer_loads_metrics_and_dims(semantic: SemanticLayer):
     assert len(semantic.metrics) >= 19
     assert len(semantic.dimensions) >= 17
-    # 5 张汇总 + ads_bi_month_shop_item_dan_detail_df (门店级) = 6
-    assert len(semantic.tables) == 6
+    # 5 张汇总 + 门店级明细 + 激活一线人员指标汇总 = 7
+    assert len(semantic.tables) == 7
     assert len(semantic.calculations) >= 7
 
 

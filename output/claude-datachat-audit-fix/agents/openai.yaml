@@ -1,4 +1,4 @@
 interface:
-  display_name: "DataChat Audit Fix"
-  short_description: "Strict DataChatV1 repair workflow"
-  default_prompt: "Use $claude-datachat-audit-fix to fix DataChatV1 according to the bundled strict audit report and verification gates."
+  display_name: "DataChat Accuracy Fix"
+  short_description: "Repair DataChatV1 NL2SQL accuracy"
+  default_prompt: "Use $claude-datachat-audit-fix to repair DataChatV1 ordinary question-answering accuracy with the bundled audit evidence and 90%+ benchmark gate."

@@ -60,13 +60,12 @@ echo
 green "═══ 本地发布完成：代码与最新前端构建已推送到 origin/main ═══"
 cat <<'EOF'
 
-下一步——登录服务器执行（让线上 = 最新）：
+下一步——登录服务器执行（一键部署+自检，让线上 = 最新）：
 
-  bash /tmp/datachat/redeploy.sh
+  DATACHAT_ADMIN_PASS='管理员密码' bash /opt/datachatv1/deploy/scripts/redeploy.sh
 
-部署后做一次"诚实自检"（自检全绿仍报错时用它定位真因：前端缓存 / SmartQ未配 / 后端真错）：
+该脚本已固化根因防护：对齐 git → 清掉未跟踪旧前端包 → 重写 systemd 指向 git 树+单worker
+→ 重启 → 自检(进程cwd / served前端 / SmartQ / 流式问数)。首访浏览器记得 Ctrl+Shift+R。
 
-  DATACHAT_ADMIN_PASS='管理员密码' bash /opt/datachatv1/scripts/diagnose_server.sh
-
-（首次启用智能小Q：在 /opt/datachatv1/.env 配 SMARTQ_ENABLED=1 与密钥后 systemctl restart datachatv1）
+（出问题时单独定位用： bash /opt/datachatv1/scripts/diagnose_server.sh）
 EOF

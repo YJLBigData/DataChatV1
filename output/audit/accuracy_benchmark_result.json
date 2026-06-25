@@ -1,0 +1,73 @@
+{
+  "total": 110,
+  "passed": 110,
+  "failed": 0,
+  "accuracy": 1.0,
+  "by_category": {
+    "sales_amount": {
+      "total": 12,
+      "passed": 12
+    },
+    "sales_qty": {
+      "total": 4,
+      "passed": 4
+    },
+    "gd_amount": {
+      "total": 4,
+      "passed": 4
+    },
+    "target_achievement": {
+      "total": 8,
+      "passed": 8
+    },
+    "topn": {
+      "total": 13,
+      "passed": 13
+    },
+    "multi_metric": {
+      "total": 8,
+      "passed": 8
+    },
+    "ratio": {
+      "total": 8,
+      "passed": 8
+    },
+    "difference": {
+      "total": 6,
+      "passed": 6
+    },
+    "yoy_mom_trend": {
+      "total": 9,
+      "passed": 9
+    },
+    "multi_filter": {
+      "total": 6,
+      "passed": 6
+    },
+    "member_heli30": {
+      "total": 8,
+      "passed": 8
+    },
+    "potential_rate": {
+      "total": 6,
+      "passed": 6
+    },
+    "followup": {
+      "total": 8,
+      "passed": 8
+    },
+    "carryover": {
+      "total": 2,
+      "passed": 2
+    },
+    "data_range": {
+      "total": 4,
+      "passed": 4
+    },
+    "misc": {
+      "total": 4,
+      "passed": 4
+    }
+  },
+  "failed_cases": []
+}
